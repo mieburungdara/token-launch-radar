@@ -40,6 +40,13 @@ export function homeChain(protocol: SnapshotProtocol): string {
   return protocol.chains[0] ?? 'Ethereum';
 }
 
+/** Whole dollars as a reader reads them. */
+function usd(value: number): string {
+  if (value >= 1e9) return `$${(value / 1e9).toFixed(1)}B`;
+  if (value >= 1e6) return `$${(value / 1e6).toFixed(value >= 1e7 ? 0 : 1)}M`;
+  return `$${Math.round(value).toLocaleString('en-US')}`;
+}
+
 /** The cost sheet for that chain. */
 export function chainCost(chain: string): ChainCost {
   return CHAIN_COSTS[chain] ?? DEFAULT_COST;
@@ -185,12 +192,18 @@ export function farmPlan(row: RadarRow, protocol: SnapshotProtocol): FarmStep[] 
   };
 
   const watch: FarmStep = {
-    step: `Watch for the launch itself: ${name} records no token as of the snapshot date, so follow its own documentation and its ${chain} deployments, and set a price alert on its TVL (a fundraise or a TVL step change usually comes first).`,
+    step: `Watch for the launch itself: ${name} records no token as of the snapshot date (this radar puts its odds at ${Math.round(row.token_odds * 100)}%), so follow its own documentation and its ${chain} deployments, and set a TVL alert: a fundraise or a step change in TVL usually comes first.`,
     cost: 'nothing',
     time: 'a few minutes a month',
   };
 
-  const plan = [setup, fund, ...(moves[family] ?? moves.general!), keep, watch];
+  const risk: FarmStep = {
+    step: `Size the position for a farm that pays nothing: ${name} holds ${usd(row.tvl_usd)} of TVL ${row.change_7d === null ? 'with its seven-day change unreported' : `and moved ${row.change_7d > 0 ? '+' : ''}${row.change_7d.toFixed(1)}% in the last seven days`}, so treat every dollar as spent on information, not on a claim.`,
+    cost: 'the position itself, and nothing should be money you need back',
+    time: 'decide before the first deposit, not after',
+  };
+
+  const plan = [setup, fund, ...(moves[family] ?? moves.general!), keep, watch, risk];
   return plan.slice(0, 8);
 }
 

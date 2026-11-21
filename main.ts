@@ -14,10 +14,12 @@ import {
   MODEL,
   MODEL_VERSION,
   SnapshotError,
+  fitLogLog,
   boardIssue,
   buildBoard,
   categoryMarkets,
   dataScript,
+  holdoutReport,
   liveProtocols,
   parseSnapshot,
   peerIndex,
@@ -67,7 +69,9 @@ try {
   throw error;
 }
 
-const board = buildBoard(snapshot, MODEL);
+const fit = fitLogLog(snapshot.protocols, MODEL);
+const validation = holdoutReport(snapshot, MODEL);
+const board = buildBoard(snapshot, MODEL, fit, { low: validation.band_low, high: validation.band_high });
 const index = new Map(snapshot.protocols.map((p) => [p.slug, p]));
 
 /** The board with its farm plans attached: the same facts the page shows, in the gate's own shape. */
@@ -91,7 +95,9 @@ writeFileSync(
       source: snapshot.source,
       model_version: MODEL_VERSION,
       model: MODEL,
+      fit: { intercept: fit.intercept, slope: fit.slope, sigma: fit.sigma },
       watchlist_size: snapshot.watchlist.length,
+      validation,
       rows: withPlans.map((row) => {
         const protocol = index.get(row.slug)!;
         return {
@@ -112,6 +118,11 @@ writeFileSync(
           peer_weight: row.peer_weight,
           peer_low_multiple: row.peer_low_multiple,
           peer_high_multiple: row.peer_high_multiple,
+          fitted_intercept: row.fitted_intercept,
+          fitted_slope: row.fitted_slope,
+          fitted_offset: row.fitted_offset,
+          fitted_offset_sample: row.fitted_offset_sample,
+          fitted_sigma: row.fitted_sigma,
           growth_multiplier: row.growth_multiplier,
           maturity_multiplier: row.maturity_multiplier,
           reach_multiplier: row.reach_multiplier,
@@ -119,6 +130,7 @@ writeFileSync(
           implied_low_usd: row.implied_low_usd,
           implied_high_usd: row.implied_high_usd,
           share_of_board: row.share_of_board,
+          token_odds: row.token_odds,
           farm_steps: row.farm_steps,
           farm_plan: row.farm_plan,
         };
@@ -146,6 +158,8 @@ const data: RadarData = {
   market_median_multiple: peers.market.median,
   board_implied_total: withPlans.reduce((sum, row) => sum + row.implied_value_usd, 0),
   uncategorised: uncategorisedCount(snapshot),
+  validation,
+  fit: { intercept: fit.intercept, slope: fit.slope, sigma: fit.sigma },
   rows: withPlans,
   live,
   categories: categoryMarkets(snapshot, peers, withPlans),

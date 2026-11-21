@@ -98,7 +98,8 @@
     { k: 'Watchlist covered', v: String(R.watchlist_size) + ' / ' + String(R.watchlist_size), s: 'every protocol the snapshot\'s own rule kept' },
     { k: 'Rank 1 implied value', v: usd(rows[0] ? rows[0].implied_value_usd : 0), s: rows[0] ? rows[0].name : '' },
     { k: 'Board implied total', v: usd(R.board_implied_total), s: 'the model\'s own claim, not a forecast' },
-    { k: 'Market median MC / TVL', v: times(R.market_median_multiple), s: 'from ' + (R.live_size) + ' protocols whose token trades' }
+    { k: 'Market median MC / TVL', v: times(R.market_median_multiple), s: 'from ' + (R.live_size) + ' protocols whose token trades' },
+    { k: 'Holdout error', v: (R.validation.fitted.holdout_mdape * 100).toFixed(0) + '%', s: 'median error pricing ' + R.validation.holdout_size + ' protocols the model was not fitted on' }
   ];
   el('kpis').innerHTML = kpis.map(function (k) {
     return '<div class="kpi"><span class="k">' + esc(k.k) + '</span><span class="v' + (k.k.indexOf('implied') >= 0 ? ' amber' : '') + '">' + esc(k.v) + '</span><span class="s">' + esc(k.s) + '</span></div>';
@@ -106,16 +107,16 @@
 
   var m = R.model;
   el('method').innerHTML =
-    '<div class="formula">peer      = (n × category median MC/TVL + ' + m.min_peers + ' × market median MC/TVL) / (n + ' + m.min_peers + ')\n' +
-    '            each peer\'s MC/TVL is winsorised to the market\'s ' + (m.winsor_low_percentile * 100) + 'th-' + (m.winsor_high_percentile * 100) + 'th percentile first, so one\n' +
-    '            mispriced peer cannot carry a category; n is the peers left in it, and ' + m.min_peers + ' pseudo-observations\n' +
-    '            of the whole market pull a thin category back toward the market\'s own multiple\n' +
-    'base      = TVL × peer\n' +
+    '<div class="formula">size      = log10(market cap) = ' + R.fit.intercept.toFixed(3) + ' + ' + R.fit.slope.toFixed(3) + ' × log10(TVL) + category offset\n' +
+    '            fitted on the snapshot\'s token-bearing protocols; each category\'s median residual is added,\n' +
+    '            shrunk toward zero by ' + m.min_peers + ' pseudo-observations, so a category with two peers\n' +
+    '            moves the estimate a fifth as far as a category with a hundred\n' +
     'growth    = 1 + clamp(change_7d, ' + m.growth_floor + '%, ' + m.growth_cap + '%) × ' + m.growth_weight + '   (unreported growth: 1.00)\n' +
     'maturity  = 0.75 + min(age without a token, ' + m.maturity_days + 'd) / ' + m.maturity_days + ' × 0.45   (age unknown: ' + m.unknown_age_multiplier.toFixed(2) + ')\n' +
     'reach     = 1 + min(chains, ' + m.chains_cap + ') × ' + m.chains_step + '\n' +
-    'implied   = max(1, round(TVL × peer × growth × maturity × reach))\n' +
-    'band      = the same arithmetic at the 25th and 75th percentile peer multiple</div>' +
+    'implied   = max(1, round(size × growth × maturity × reach))\n' +
+    'band      = the middle half of the holdout half\'s actual-over-predicted ratios: ×' + R.validation.band_low.toFixed(2) + ' to ×' + R.validation.band_high.toFixed(2) + '\n' +
+    'odds      = ' + m.odds_base + ' × age factor × size factor × category factor, clamped to ' + m.odds_floor + '..' + m.odds_cap + '</div>' +
     '<p><b>Every input is in the snapshot.</b> The peer multiple is not a constant: it is read from the protocols this same file records a market cap for, so the model moves with the market it was sealed against. TVL, its seven-day change and the age a protocol has run without a token are the three facts the judge asked for; chain reach is the fourth, and it is the only one that is not a market figure.</p>' +
     '<p><b>What is set aside.</b> ' + R.set_aside_size + ' records-no-token protocols are not launch candidates: wrapped, staked and bridged products of a token that already trades, exchange-run products, and versioned pools. They are counted here and ranked nowhere, because their launch is somebody else\'s token under another name.</p>' +
     '<p><b>What this is not.</b> DefiLlama\'s record is not proof: a row says a protocol <b>records no token</b> as of ' + R.as_of + ', never that it has none. An implied value is this radar\'s claim about a launch that has not happened. ' + m.step_cost_note + '.</p>';
@@ -168,6 +169,20 @@
 
   var maxImplied = rows.reduce(function (top, r) { return Math.max(top, r.implied_value_usd); }, 1);
 
+  // The head of the radar as a bar chart: the twelve rows the board puts first.
+  function drawChart() {
+    var head = rows.slice(0, 12);
+    var top = head.length ? head[0].implied_value_usd : 1;
+    el('validationchip').textContent = 'holdout median error ' + (R.validation.fitted.holdout_mdape * 100).toFixed(0) + '% over ' + R.validation.holdout_size + ' priced protocols (' + R.validation.fit_size + ' fitted)';
+    el('topchart').innerHTML = head.map(function (r) {
+      var width = Math.max(2, Math.round((r.implied_value_usd / top) * 100));
+      return '<button type="button" class="barrow" data-slug="' + esc(r.slug) + '">' +
+        '<span class="barlabel">' + esc(r.name) + '<span class="slug"> · ' + esc(r.category || '—') + '</span></span>' +
+        '<span class="bartrack"><i style="width:' + width + '%"></i></span>' +
+        '<span class="barvalue">' + usd(r.implied_value_usd) + '</span></button>';
+    }).join('');
+  }
+
   function render() {
     var out = visible();
     el('rows').innerHTML = out.map(function (r) {
@@ -182,6 +197,7 @@
         '<td class="num">' + ageLabel(r.age_days) + '</td>' +
         '<td class="num"><span class="val">' + usdExact(r.implied_value_usd) + '</span><div class="bar"><i style="width:' + width + '%"></i></div></td>' +
         '<td class="num bandcell">' + usd(r.implied_low_usd) + ' – ' + usd(r.implied_high_usd) + '</td>' +
+        '<td class="num">' + Math.round(r.token_odds * 100) + '%</td>' +
         '<td class="plan">' + r.farm_plan.length + ' steps · ' + esc(String(r.farm_plan[0].step).slice(0, 62)) + '…</td>' +
         '</tr>';
     }).join('');
@@ -192,11 +208,14 @@
     if (!out.length) el('empty').textContent = 'No row matches these filters. Widen the category, the chain or the TVL floor.';
     var livePanel = el('livePanel');
     var marketPanel = el('marketPanel');
+    var validationPanel = el('validationPanel');
     livePanel.hidden = state.view !== 'live';
     marketPanel.hidden = state.view !== 'market';
-    document.querySelector('.panel[aria-labelledby="boardh"]').hidden = state.view === 'live' || state.view === 'market';
-    el('controls').hidden = state.view === 'live' || state.view === 'market';
-    el('counts').hidden = state.view === 'live' || state.view === 'market';
+    validationPanel.hidden = state.view !== 'validation';
+    var boardHidden = state.view === 'live' || state.view === 'market' || state.view === 'validation';
+    document.querySelector('.panel[aria-labelledby="boardh"]').hidden = boardHidden;
+    el('controls').hidden = boardHidden;
+    el('counts').hidden = boardHidden;
   }
 
   // ---------------------------------------------------------------- live and market tables
@@ -208,6 +227,26 @@
       '<td class="num">' + usd(r.mcap_usd) + '</td>' +
       '<td class="num ' + (r.multiple >= R.market_median_multiple ? 'up' : 'down') + '">' + times(r.multiple) + '</td></tr>';
   }).join('');
+  var v = R.validation;
+  var line = function (score) {
+    return '<div class="card"><h4>' + esc(score.name) + (score.name === (v.chosen === 'fitted' ? 'log-log fit' : 'multiple of TVL') ? ' &middot; the board uses this one' : '') + '</h4><dl class="kv">' +
+      '<dt>Median error, holdout half</dt><dd class="val">' + (score.holdout_mdape * 100).toFixed(1) + '%</dd>' +
+      '<dt>Median error, fit half</dt><dd>' + (score.fit_mdape * 100).toFixed(1) + '%</dd>' +
+      '<dt>Within half the truth</dt><dd>' + score.holdout_within_half + ' of ' + v.holdout_size + '</dd>' +
+      '<dt>Within twice the truth</dt><dd>' + score.holdout_within_2x + ' of ' + v.holdout_size + '</dd></dl></div>';
+  };
+  el('validation').innerHTML =
+    line(v.fitted) + line(v.constant) +
+    '<div class="card"><h4>The split</h4><dl class="kv">' +
+      '<dt>Token-bearing protocols</dt><dd>' + (v.fit_size + v.holdout_size) + '</dd>' +
+      '<dt>Fit half</dt><dd>' + v.fit_size + '</dd>' +
+      '<dt>Holdout half</dt><dd>' + v.holdout_size + '</dd>' +
+      '<dt>Split by</dt><dd>hash of slug, even/odd</dd>' +
+      '<dt>Band in force</dt><dd>×' + v.band_low.toFixed(2) + ' – ×' + v.band_high.toFixed(2) + '</dd>' +
+      '<dt>Residual spread</dt><dd>' + v.sigma.toFixed(2) + ' log10</dd></dl>' +
+      '<p class="note">Both estimators are fitted on the fit half only and judged on the holdout half. The board uses whichever prices the holdout half better; today that is the ' + (v.chosen === 'fitted' ? 'log-log fit' : 'flat multiple of TVL') + '. The gap between each one\'s two errors is how much of it is memorised rather than learned.</p></div>' +
+    '<div class="card"><h4>What this does not mean</h4><p class="note">A pre-token protocol has no market cap to be wrong about, so the only checkable part of this radar is how it prices the protocols whose token already trades. A holdout error of ' + (v.fitted.holdout_mdape * 100).toFixed(0) + '% is the size of the claim under every row, and the band on each row is that error made honest rather than a forecast.</p></div>';
+
   el('marketrows').innerHTML = categories.map(function (c) {
     return '<tr><td>' + esc(c.category) + '</td><td class="num">' + c.peers + '</td><td class="num val">' + times(c.median_multiple) +
       '</td><td class="num">' + times(c.low_multiple) + '</td><td class="num">' + times(c.high_multiple) + '</td><td class="num">' + c.pre_token + '</td></tr>';
@@ -247,14 +286,17 @@
           '<dt>Chains</dt><dd>' + (r.chains || []).length + '</dd>' +
           '<dt>Token record</dt><dd>none as of ' + esc(R.as_of) + '</dd></dl></div>' +
         '<div class="card"><h4>Value model, this row</h4><dl class="kv">' +
-          '<dt>Peer multiple (' + r.peer_basis + ', n=' + r.peer_sample + ')</dt><dd class="val">' + times(r.peer_multiple) + '</dd>' +
-          '<dt>That category\'s own weight</dt><dd>' + (r.peer_weight * 100).toFixed(1) + '%</dd>' +
-          '<dt>Peer 25th / 75th (blended)</dt><dd>' + times(r.peer_low_multiple) + ' / ' + times(r.peer_high_multiple) + '</dd>' +
+          '<dt>Fit intercept / slope</dt><dd>' + (r.fitted_intercept === null ? '—' : r.fitted_intercept.toFixed(3) + ' / ' + r.fitted_slope.toFixed(3)) + '</dd>' +
+          '<dt>Category offset (' + r.peer_basis + ', n=' + r.fitted_offset_sample + ')</dt><dd class="val">' + (r.fitted_offset >= 0 ? '+' : '') + r.fitted_offset.toFixed(3) + ' log10</dd>' +
+          '<dt>Comparison: multiple of TVL</dt><dd>' + times(r.peer_multiple) + '</dd>' +
           '<dt>Growth multiplier</dt><dd>' + r.growth_multiplier.toFixed(3) + '</dd>' +
           '<dt>Maturity multiplier</dt><dd>' + r.maturity_multiplier.toFixed(3) + '</dd>' +
           '<dt>Chain reach multiplier</dt><dd>' + r.reach_multiplier.toFixed(3) + '</dd>' +
-          '<dt>Share of the board</dt><dd>' + (r.share_of_board * 100).toFixed(2) + '%</dd></dl>' +
-          '<div class="formula">' + usd(r.tvl_usd) + ' × ' + times(r.peer_multiple) + ' × ' + r.growth_multiplier.toFixed(3) + ' × ' + r.maturity_multiplier.toFixed(3) + ' × ' + r.reach_multiplier.toFixed(3) + ' = ' + usdExact(r.implied_value_usd) + '</div></div>' +
+          '<dt>Share of the board</dt><dd>' + (r.share_of_board * 100).toFixed(2) + '%</dd>' +
+          '<dt>Token odds (the model\'s claim)</dt><dd>' + Math.round(r.token_odds * 100) + '%</dd></dl>' +
+          '<div class="formula">size ' + usd(r.tvl_usd) + ' → ' + usdExact(r.implied_value_usd / (r.growth_multiplier * r.maturity_multiplier * r.reach_multiplier)) + '\n' +
+          '× growth ' + r.growth_multiplier.toFixed(3) + ' × maturity ' + r.maturity_multiplier.toFixed(3) + ' × reach ' + r.reach_multiplier.toFixed(3) + '\n' +
+          '= ' + usdExact(r.implied_value_usd) + '  (band ' + usd(r.implied_low_usd) + ' – ' + usd(r.implied_high_usd) + ')</div></div>' +
         '<div class="card"><h4>Why this protocol, now</h4><p class="note">' + esc(whyText(r)) + '</p></div>' +
       '</div>' +
       '<div class="card"><h4>Farm plan</h4><ol class="steps">' + plan + '</ol></div>' +
@@ -304,6 +346,29 @@
     var tr = event.target.closest('tr[data-slug]');
     if (tr) openDetail(tr.getAttribute('data-slug'));
   });
+  el('topchart').addEventListener('click', function (event) {
+    var bar = event.target.closest('[data-slug]');
+    if (bar) openDetail(bar.getAttribute('data-slug'));
+  });
+  el('export').addEventListener('click', function () {
+    var out = visible();
+    var head = ['rank', 'slug', 'name', 'category', 'chains', 'tvl_usd', 'change_7d', 'age_days', 'implied_value_usd', 'implied_low_usd', 'implied_high_usd', 'peer_multiple', 'peer_basis', 'peer_sample', 'token_odds'];
+    var cell = function (value) {
+      var text = value === null || value === undefined ? '' : String(value);
+      return /[",\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+    };
+    var lines = [head.join(',')];
+    out.forEach(function (r) {
+      lines.push([r.rank, r.slug, r.name, r.category || '', (r.chains || []).join(' '), r.tvl_usd, r.change_7d, r.age_days, r.implied_value_usd, r.implied_low_usd, r.implied_high_usd, r.peer_multiple, r.peer_basis, r.peer_sample, r.token_odds].map(cell).join(','));
+    });
+    var blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+    var link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'token-radar-' + R.as_of + '.csv';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  });
   el('close').addEventListener('click', closeDetail);
   document.addEventListener('keydown', function (event) {
     if (event.key === 'Escape' && state.slug) closeDetail();
@@ -346,6 +411,7 @@
     tab.classList.toggle('is-on', on);
     tab.setAttribute('aria-selected', on ? 'true' : 'false');
   });
+  drawChart();
   render();
   if (state.slug && bySlug[state.slug]) openDetail(state.slug);
   document.getElementById('board').setAttribute('aria-busy', 'false');

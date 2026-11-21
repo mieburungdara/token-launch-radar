@@ -17,6 +17,16 @@
 // The band is the same arithmetic at the 25th and 75th percentile peer multiple, so every row carries the
 // spread its own comparison set shows rather than a single number with no error bar.
 //
+//   odds      = 0.35 x age factor x size factor x category factor, clamped to 0.02..0.95: the model's own
+//               estimate that the protocol issues a token at all, kept apart from the value so a reader can
+//               weigh a certain small protocol against a doubtful large one
+//
+// The estimator is checked against the snapshot itself: the token-bearing protocols are split by a hash of
+// their slug into a fit half and a holdout half, the multiples are fitted on the fit half, and the market cap
+// they predict is compared with the one the market actually prices on both halves. The report on the page is
+// the holdout half's median absolute error: a model that cannot price the protocols whose token already
+// trades says nothing about the ones that have none.
+//
 // Wrapped, staked, bridged and exchange-run products are not launch candidates: they are somebody else's
 // token under another name. They are counted and set aside, never ranked.
 
@@ -58,6 +68,12 @@ export interface ModelConstants {
   /** Every peer's multiple is winsorised to these percentiles of the market's before a category reads it. */
   winsor_low_percentile: number;
   winsor_high_percentile: number;
+  /** The odds model: a base rate, how far age and category push it, and the clamp. */
+  odds_base: number;
+  odds_age_weight: number;
+  odds_category_weight: number;
+  odds_floor: number;
+  odds_cap: number;
   band_low_percentile: number;
   band_high_percentile: number;
   step_cost_note: string;
@@ -78,6 +94,11 @@ export const MODEL: ModelConstants = {
   band_high_percentile: 0.75,
   winsor_low_percentile: 0.1,
   winsor_high_percentile: 0.9,
+  odds_base: 0.35,
+  odds_age_weight: 0.6,
+  odds_category_weight: 0.5,
+  odds_floor: 0.02,
+  odds_cap: 0.95,
   step_cost_note: 'costs are the ones a first-week farmer pays in gas, bridge and deposit fees only',
 };
 
@@ -108,6 +129,11 @@ export interface RadarRow {
   peer_weight: number;
   peer_low_multiple: number;
   peer_high_multiple: number;
+  fitted_intercept: number | null;
+  fitted_slope: number | null;
+  fitted_offset: number;
+  fitted_offset_sample: number;
+  fitted_sigma: number | null;
   growth_multiplier: number;
   maturity_multiplier: number;
   reach_multiplier: number;
@@ -115,6 +141,7 @@ export interface RadarRow {
   implied_low_usd: number;
   implied_high_usd: number;
   share_of_board: number;
+  token_odds: number;
   farm_steps: string[];
   farm_plan: FarmStep[];
 }
@@ -157,6 +184,8 @@ export interface RadarData {
   market_median_multiple: number;
   board_implied_total: number;
   uncategorised: number;
+  validation: HoldoutReport;
+  fit: { intercept: number; slope: number; sigma: number };
   rows: RadarRow[];
   live: LiveRow[];
   categories: CategoryMarket[];
@@ -235,6 +264,30 @@ export interface PeerIndex {
   market: MultipleStat;
 }
 
+/** What each estimator scores when it is asked to price the protocols whose token already trades. */
+export interface HoldoutReport {
+  fit_size: number;
+  holdout_size: number;
+  constant: EstimatorScore;
+  fitted: EstimatorScore;
+  chosen: 'constant' | 'fitted';
+  /** The fitted model's residual spread in log10 dollars, kept as the loose reading of the band. */
+  sigma: number;
+  /** The middle half of the holdout half's actual-over-predicted ratios: the band the page shows. */
+  band_low: number;
+  band_high: number;
+}
+
+/** FNV-1a over a slug: which half a protocol is fitted on, stable for the sealed snapshot. */
+function fnv1a(text: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash >>> 0;
+}
+
 /** One group's own median and quartiles. */
 function statOf(values: number[]): { median: number; low: number; high: number; sample: number } {
   const sorted = values.slice().sort((a, b) => a - b);
@@ -246,11 +299,11 @@ function statOf(values: number[]): { median: number; low: number; high: number; 
   };
 }
 
-/** Each category's multiple, shrunk toward the market's: n observations of its own, MIN_PEERS of the market's. */
-export function peerIndex(snapshot: Snapshot, model: ModelConstants): PeerIndex {
+/** The same, over any set of protocols: what the holdout check fits its multiples on. */
+export function peerIndexOf(protocols: SnapshotProtocol[], model: ModelConstants): PeerIndex {
   const groups = new Map<string, number[]>();
   const all: number[] = [];
-  for (const p of snapshot.protocols) {
+  for (const p of protocols) {
     if (!hasTradedMultiple(p)) continue;
     const multiple = p.mcap_usd! / p.tvl_usd;
     all.push(multiple);
@@ -281,11 +334,133 @@ export function peerIndex(snapshot: Snapshot, model: ModelConstants): PeerIndex 
   return { byCategory, market };
 }
 
+/** Each category's multiple over the whole snapshot. */
+export function peerIndex(snapshot: Snapshot, model: ModelConstants): PeerIndex {
+  return peerIndexOf(snapshot.protocols, model);
+}
+
+/** The multiple one protocol gets under an index: its category's, or the market's when the category is thin. */
+export function multipleFor(protocol: SnapshotProtocol, index: PeerIndex): number {
+  const match = index.byCategory.get(protocol.category ?? 'Uncategorised');
+  return match === undefined ? index.market.median : match.median;
+}
+
+/** A log-log fit of market cap on TVL, with a shrunk offset per category, and the residual spread. */
+export interface LogFit {
+  intercept: number;
+  slope: number;
+  sigma: number;
+  offsets: Map<string, number>;
+  offset_samples: Map<string, number>;
+}
+
+const LOG10 = Math.log10;
+
+/** Fit log10(market cap) = intercept + slope x log10(TVL), plus each category's shrunk median residual. */
+export function fitLogLog(protocols: SnapshotProtocol[], model: ModelConstants): LogFit {
+  const points = protocols.filter(hasTradedMultiple).map((p) => ({ p, x: LOG10(p.tvl_usd), y: LOG10(p.mcap_usd!) }));
+  if (points.length < 8) {
+    return { intercept: LOG10(0.2), slope: 1, sigma: 0.6, offsets: new Map(), offset_samples: new Map() };
+  }
+  const meanX = points.reduce((sum, q) => sum + q.x, 0) / points.length;
+  const meanY = points.reduce((sum, q) => sum + q.y, 0) / points.length;
+  let cov = 0;
+  let varX = 0;
+  for (const q of points) {
+    cov += (q.x - meanX) * (q.y - meanY);
+    varX += (q.x - meanX) ** 2;
+  }
+  const slope = varX === 0 ? 1 : cov / varX;
+  const intercept = meanY - slope * meanX;
+  const byCategory = new Map<string, number[]>();
+  const residuals: number[] = [];
+  for (const q of points) {
+    const residual = q.y - (intercept + slope * q.x);
+    residuals.push(residual);
+    const key = q.p.category ?? 'Uncategorised';
+    const list = byCategory.get(key);
+    if (list === undefined) byCategory.set(key, [residual]);
+    else list.push(residual);
+  }
+  const offsets = new Map<string, number>();
+  const offset_samples = new Map<string, number>();
+  for (const [category, values] of byCategory) {
+    const own = median(values.slice().sort((a, b) => a - b));
+    const weight = values.length / (values.length + model.min_peers);
+    offsets.set(category, own * weight);
+    offset_samples.set(category, values.length);
+  }
+  const absolute = residuals.map(Math.abs).sort((a, b) => a - b);
+  return { intercept, slope, sigma: 1.4826 * median(absolute), offsets, offset_samples };
+}
+
+/** What the fit predicts for a protocol, in dollars, before the growth, maturity and reach terms. */
+export function predictFromFit(protocol: SnapshotProtocol, fit: LogFit): number {
+  const offset = fit.offsets.get(protocol.category ?? 'Uncategorised') ?? 0;
+  return 10 ** (fit.intercept + fit.slope * LOG10(Math.max(protocol.tvl_usd, 1)) + offset);
+}
+
+/** One estimator's score: its median absolute error on the half it was fitted on and on the half it was not. */
+export interface EstimatorScore {
+  name: string;
+  fit_mdape: number;
+  holdout_mdape: number;
+  holdout_within_2x: number;
+  holdout_within_half: number;
+}
+
+/** Score one predictor of a protocol's market cap against the market's own figure. */
+function scoreEstimator(
+  name: string,
+  fit: SnapshotProtocol[],
+  holdout: SnapshotProtocol[],
+  predict: (p: SnapshotProtocol) => number,
+): EstimatorScore {
+  const errors = (set: SnapshotProtocol[]): number[] =>
+    set.map((p) => Math.abs(predict(p) - p.mcap_usd!) / p.mcap_usd!).sort((a, b) => a - b);
+  const fitErrors = errors(fit);
+  const holdoutErrors = errors(holdout);
+  return {
+    name,
+    fit_mdape: median(fitErrors),
+    holdout_mdape: median(holdoutErrors),
+    holdout_within_2x: holdoutErrors.filter((e) => e <= 1).length,
+    holdout_within_half: holdoutErrors.filter((e) => e <= 0.5).length,
+  };
+}
+
+/** Both estimators, fitted on half the token-bearing protocols and judged on the other half. */
+export function holdoutReport(snapshot: Snapshot, model: ModelConstants): HoldoutReport {
+  const priced = snapshot.protocols.filter(hasTradedMultiple);
+  const fit = priced.filter((p) => fnv1a(p.slug) % 2 === 0);
+  const holdout = priced.filter((p) => fnv1a(p.slug) % 2 === 1);
+  const index = peerIndexOf(fit, model);
+  const logFit = fitLogLog(fit, model);
+  const constant = scoreEstimator('multiple of TVL', fit, holdout, (p) => p.tvl_usd * multipleFor(p, index));
+  const fitted = scoreEstimator('log-log fit', fit, holdout, (p) => predictFromFit(p, logFit));
+  const ratios = holdout.map((p) => p.mcap_usd! / predictFromFit(p, logFit)).sort((a, b) => a - b);
+  return {
+    fit_size: fit.length,
+    holdout_size: holdout.length,
+    constant,
+    fitted,
+    chosen: fitted.holdout_mdape <= constant.holdout_mdape ? 'fitted' : 'constant',
+    sigma: logFit.sigma,
+    band_low: percentile(ratios, model.band_low_percentile),
+    band_high: percentile(ratios, model.band_high_percentile),
+  };
+}
+
 /** One protocol's value under the model, with every multiplier named. */
 export interface Valuation {
   implied: number;
   low: number;
   high: number;
+  fitted_intercept: number | null;
+  fitted_slope: number | null;
+  fitted_offset: number;
+  fitted_offset_sample: number;
+  fitted_sigma: number | null;
   peerMultiple: number;
   peerLow: number;
   peerHigh: number;
@@ -298,7 +473,14 @@ export interface Valuation {
   age: number | null;
 }
 
-export function valueProtocol(p: SnapshotProtocol, asOf: string, peers: PeerIndex, model: ModelConstants): Valuation {
+export function valueProtocol(
+  p: SnapshotProtocol,
+  asOf: string,
+  peers: PeerIndex,
+  model: ModelConstants,
+  fit: LogFit | null = null,
+  band: { low: number; high: number } | null = null,
+): Valuation {
   const category = p.category ?? 'Uncategorised';
   const match = peers.byCategory.get(category);
   const peer = match ?? peers.market;
@@ -313,10 +495,17 @@ export function valueProtocol(p: SnapshotProtocol, asOf: string, peers: PeerInde
   const reachMultiplier = 1 + Math.min(Math.max(p.chains.length, 1), model.chains_cap) * model.chains_step;
   const scale = growthMultiplier * maturityMultiplier * reachMultiplier;
   const round = (value: number): number => Math.max(1, Math.round(value));
+  const base = fit === null ? p.tvl_usd * peer.median : predictFromFit(p, fit);
+  const spread = band === null ? (fit === null ? null : 10 ** fit.sigma) : null;
   return {
-    implied: round(p.tvl_usd * peer.median * scale),
-    low: round(p.tvl_usd * peer.low * scale),
-    high: round(p.tvl_usd * peer.high * scale),
+    implied: round(base * scale),
+    low: round((band !== null ? base * band.low : spread === null ? p.tvl_usd * peer.low : base / spread) * scale),
+    high: round((band !== null ? base * band.high : spread === null ? p.tvl_usd * peer.high : base * spread) * scale),
+    fitted_intercept: fit === null ? null : fit.intercept,
+    fitted_slope: fit === null ? null : fit.slope,
+    fitted_offset: fit === null ? 0 : fit.offsets.get(category) ?? 0,
+    fitted_offset_sample: fit === null ? 0 : fit.offset_samples.get(category) ?? 0,
+    fitted_sigma: fit === null ? null : fit.sigma,
     peerMultiple: peer.median,
     peerLow: peer.low,
     peerHigh: peer.high,
@@ -328,6 +517,36 @@ export function valueProtocol(p: SnapshotProtocol, asOf: string, peers: PeerInde
     reachMultiplier,
     age,
   };
+}
+
+/** How often a category's protocols already carry a token: 0..1, the model's own reason for its odds. */
+export function categoryTokenShare(snapshot: Snapshot): Map<string, number> {
+  const total = new Map<string, number>();
+  const withToken = new Map<string, number>();
+  for (const p of snapshot.protocols) {
+    const key = p.category ?? 'Uncategorised';
+    total.set(key, (total.get(key) ?? 0) + 1);
+    if (p.mcap_usd !== null && p.mcap_usd > 0) withToken.set(key, (withToken.get(key) ?? 0) + 1);
+  }
+  const share = new Map<string, number>();
+  for (const [key, count] of total) share.set(key, count === 0 ? 0 : (withToken.get(key) ?? 0) / count);
+  return share;
+}
+
+/** The model's own estimate that a protocol issues a token at all: 0.02..0.95, and never a fact. */
+export function tokenOdds(
+  p: SnapshotProtocol,
+  asOf: string,
+  sizePercentile: number,
+  tokenShare: number,
+  model: ModelConstants,
+): number {
+  const age = ageDays(asOf, p.listed_at);
+  const ageFactor = age === null ? 1 : 1 + (Math.min(age, model.maturity_days) / model.maturity_days) * model.odds_age_weight;
+  const sizeFactor = 0.7 + Math.min(Math.max(sizePercentile, 0), 1) * 1.3;
+  const categoryFactor = 1 + Math.min(Math.max(tokenShare, 0), 1) * model.odds_category_weight;
+  const odds = model.odds_base * ageFactor * sizeFactor * categoryFactor;
+  return Math.min(model.odds_cap, Math.max(model.odds_floor, Math.round(odds * 1000) / 1000));
 }
 
 /** Every slug that must appear on the board, whatever the model thinks of it. */
@@ -347,11 +566,32 @@ function chosenProtocols(snapshot: Snapshot): Map<string, SnapshotProtocol> {
 }
 
 /** The board: every candidate ranked by implied value, ranks 1..n. */
-export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): RadarRow[] {
+export function buildBoard(
+  snapshot: Snapshot,
+  model: ModelConstants = MODEL,
+  fit: LogFit | null = null,
+  band: { low: number; high: number } | null = null,
+): RadarRow[] {
   const peers = peerIndex(snapshot, model);
   const chosen = chosenProtocols(snapshot);
   const watchlist = new Set(snapshot.watchlist);
-  const scored = [...chosen.values()].map((p) => ({ p, v: valueProtocol(p, snapshot.as_of, peers, model) }));
+  const tvls = [...chosen.values()].map((p) => p.tvl_usd).sort((a, b) => a - b);
+  const atOrBelow = (value: number): number => {
+    let low = 0;
+    let high = tvls.length;
+    while (low < high) {
+      const mid = (low + high) >> 1;
+      if (tvls[mid]! <= value) low = mid + 1;
+      else high = mid;
+    }
+    return tvls.length === 0 ? 0.5 : low / tvls.length;
+  };
+  const shares = categoryTokenShare(snapshot);
+  const scored = [...chosen.values()].map((p) => ({
+    p,
+    v: valueProtocol(p, snapshot.as_of, peers, model, fit, band),
+    odds: tokenOdds(p, snapshot.as_of, atOrBelow(p.tvl_usd), shares.get(p.category ?? 'Uncategorised') ?? 0, model),
+  }));
   scored.sort((a, b) => b.v.implied - a.v.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   const total = scored.reduce((sum, s) => sum + s.v.implied, 0);
   return scored.map((s, i) => ({
@@ -371,6 +611,11 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): R
     peer_weight: s.v.peerWeight,
     peer_low_multiple: s.v.peerLow,
     peer_high_multiple: s.v.peerHigh,
+    fitted_intercept: s.v.fitted_intercept,
+    fitted_slope: s.v.fitted_slope,
+    fitted_offset: s.v.fitted_offset,
+    fitted_offset_sample: s.v.fitted_offset_sample,
+    fitted_sigma: s.v.fitted_sigma,
     growth_multiplier: s.v.growthMultiplier,
     maturity_multiplier: s.v.maturityMultiplier,
     reach_multiplier: s.v.reachMultiplier,
@@ -378,6 +623,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): R
     implied_low_usd: s.v.low,
     implied_high_usd: s.v.high,
     share_of_board: total === 0 ? 0 : s.v.implied / total,
+    token_odds: s.odds,
     farm_steps: [],
     farm_plan: [],
   }));

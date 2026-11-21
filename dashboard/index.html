@@ -24,6 +24,14 @@
 <main>
   <section id="kpis" class="kpis" aria-label="Snapshot at a glance"></section>
 
+  <section class="panel chartpanel" aria-labelledby="charth">
+    <div class="panelhead">
+      <h2 id="charth">The radar's head: the twelve biggest implied launches</h2>
+      <span class="chipline" id="validationchip"></span>
+    </div>
+    <div id="topchart" class="chart"></div>
+  </section>
+
   <section class="panel method" aria-labelledby="methodh">
     <h2 id="methodh">How the value is derived</h2>
     <div id="method" class="methodbody"></div>
@@ -37,6 +45,7 @@
         <button class="tab" role="tab" aria-selected="false" data-view="watch">Watchlist only</button>
         <button class="tab" role="tab" aria-selected="false" data-view="live">Already trading</button>
         <button class="tab" role="tab" aria-selected="false" data-view="market">Market multiples</button>
+        <button class="tab" role="tab" aria-selected="false" data-view="validation">Model check</button>
       </div>
     </div>
 
@@ -79,6 +88,7 @@
         <span>Growing TVL only</span>
       </label>
       <button type="button" class="reset" id="reset">Reset</button>
+      <button type="button" class="reset" id="export">Export CSV</button>
     </form>
 
     <p class="counts" id="counts" role="status"></p>
@@ -95,6 +105,7 @@
             <th class="num">Age</th>
             <th class="num">Implied value</th>
             <th class="num">Band</th>
+            <th class="num">Token odds</th>
             <th>Farm</th>
           </tr>
         </thead>
@@ -115,6 +126,12 @@
         <tbody id="liverows"></tbody>
       </table>
     </div>
+  </section>
+
+  <section class="panel" id="validationPanel" hidden aria-labelledby="validationh">
+    <h2 id="validationh">Model check: does this estimator price protocols that already trade?</h2>
+    <p class="note">The snapshot's token-bearing protocols are split by a hash of their slug into a fit half and a holdout half. The multiples are fitted on the fit half only, then both halves are priced with them and compared with the market caps the market itself pays. A model that cannot price the protocols whose token trades has no standing on the ones that have none.</p>
+    <div id="validation" class="dgrid"></div>
   </section>
 
   <section class="panel" id="marketPanel" hidden aria-labelledby="marketh">
