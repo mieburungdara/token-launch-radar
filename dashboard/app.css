@@ -121,6 +121,11 @@ input[type="search"]:focus, select:focus { outline: 2px solid var(--amber-dim); 
 @media (max-width: 720px) { .barrow { grid-template-columns: 1fr 70px; } .bartrack { display: none; } }
 .tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
 table.board { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.board th.sortable { cursor: pointer; user-select: none; }
+table.board th.sortable:hover { color: var(--text); }
+table.board th.is-sorted { color: var(--amber); }
+table.board th.sortable::after { content: ' ⇅'; color: var(--line-2); font-size: 10px; }
+table.board th.is-sorted::after { content: ' ↓'; color: var(--amber); }
 table.board th {
   text-align: left; color: var(--faint); font-weight: 600; font-size: 11px;
   text-transform: uppercase; letter-spacing: 0.07em;

@@ -117,7 +117,7 @@
     'implied   = max(1, round(size × growth × maturity × reach))\n' +
     'band      = the middle half of the holdout half\'s actual-over-predicted ratios: ×' + R.validation.band_low.toFixed(2) + ' to ×' + R.validation.band_high.toFixed(2) + '\n' +
     'odds      = ' + m.odds_base + ' × age factor × size factor × category factor, clamped to ' + m.odds_floor + '..' + m.odds_cap + '</div>' +
-    '<p><b>Every input is in the snapshot.</b> The peer multiple is not a constant: it is read from the protocols this same file records a market cap for, so the model moves with the market it was sealed against. TVL, its seven-day change and the age a protocol has run without a token are the three facts the judge asked for; chain reach is the fourth, and it is the only one that is not a market figure.</p>' +
+    '<p><b>Every input is in the snapshot.</b> Nothing here is a fixed multiple: the size term is a line fitted through the protocols this same file records a market cap for, so the model moves with the market it was sealed against, and the band under every row is the error that fit actually made on protocols it had never seen. TVL, its seven-day change and the age a protocol has run without a token are the three facts the board is asked to weigh; chain reach is the fourth, and it is the only one that is not a market figure.</p>' +
     '<p><b>What is set aside.</b> ' + R.set_aside_size + ' records-no-token protocols are not launch candidates: wrapped, staked and bridged products of a token that already trades, exchange-run products, and versioned pools. They are counted here and ranked nowhere, because their launch is somebody else\'s token under another name.</p>' +
     '<p><b>What this is not.</b> DefiLlama\'s record is not proof: a row says a protocol <b>records no token</b> as of ' + R.as_of + ', never that it has none. An implied value is this radar\'s claim about a launch that has not happened. ' + m.step_cost_note + '.</p>';
 
@@ -164,6 +164,8 @@
     else if (state.sort === 'age') sorted.sort(function (a, b) { return (b.age_days === null ? -1 : b.age_days) - (a.age_days === null ? -1 : a.age_days); });
     else if (state.sort === 'band') sorted.sort(function (a, b) { return (b.implied_high_usd / b.implied_value_usd) - (a.implied_high_usd / a.implied_value_usd); });
     else if (state.sort === 'name') sorted.sort(function (a, b) { return a.name.localeCompare(b.name); });
+    else if (state.sort === 'category') sorted.sort(function (a, b) { return (a.category || '~').localeCompare(b.category || '~') || a.rank - b.rank; });
+    else if (state.sort === 'odds') sorted.sort(function (a, b) { return b.token_odds - a.token_odds; });
     return sorted;
   }
 
@@ -203,7 +205,8 @@
     }).join('');
     var what = state.view === 'watch' ? 'watchlist rows' : 'ranked pre-token rows';
     el('counts').textContent = out.length + ' of ' + rows.length + ' ' + what + ' shown' +
-      (state.sort === 'rank' ? ', strongest implied value first' : ', sorted by ' + el('sort').selectedOptions[0].textContent);
+      (state.sort === 'rank' ? ', strongest implied value first' : ', sorted by ' + (SORT_LABEL[state.sort] || state.sort)) +
+      ' — click any numbered column heading to sort by it';
     el('empty').hidden = out.length > 0;
     if (!out.length) el('empty').textContent = 'No row matches these filters. Widen the category, the chain or the TVL floor.';
     var livePanel = el('livePanel');
@@ -214,6 +217,9 @@
     validationPanel.hidden = state.view !== 'validation';
     var boardHidden = state.view === 'live' || state.view === 'market' || state.view === 'validation';
     document.querySelector('.panel[aria-labelledby="boardh"]').hidden = boardHidden;
+    el('kpis').hidden = state.view === 'validation';
+    el('chartPanel').hidden = boardHidden;
+    el('methodPanel').hidden = state.view === 'validation' ? false : boardHidden;
     el('controls').hidden = boardHidden;
     el('counts').hidden = boardHidden;
   }
@@ -390,6 +396,18 @@
     state.q = ''; state.category = 'all'; state.chain = 'all'; state.minTvl = 0; state.sort = 'rank'; state.growing = false;
     el('q').value = ''; el('category').value = 'all'; el('chain').value = 'all'; el('minTvl').value = '0'; el('sort').value = 'rank'; el('growing').checked = false;
     render(); push();
+  });
+  var SORT_LABEL = { rank: 'implied value', tvl: 'TVL', growth: '7-day growth', age: 'age without a token', band: 'band width', name: 'name', category: 'category', odds: 'token odds' };
+  Array.prototype.forEach.call(document.querySelectorAll('#headrow th.sortable'), function (th) {
+    th.addEventListener('click', function () {
+      var key = th.getAttribute('data-sort');
+      state.sort = key;
+      if (el('sort').querySelector('option[value="' + key + '"]')) el('sort').value = key;
+      Array.prototype.forEach.call(document.querySelectorAll('#headrow th'), function (other) { other.classList.remove('is-sorted'); });
+      th.classList.add('is-sorted');
+      render();
+      push();
+    });
   });
   Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (tab) {
     tab.addEventListener('click', function () {

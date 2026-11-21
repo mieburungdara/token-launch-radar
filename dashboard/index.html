@@ -24,7 +24,7 @@
 <main>
   <section id="kpis" class="kpis" aria-label="Snapshot at a glance"></section>
 
-  <section class="panel chartpanel" aria-labelledby="charth">
+  <section class="panel chartpanel" id="chartPanel" aria-labelledby="charth">
     <div class="panelhead">
       <h2 id="charth">The radar's head: the twelve biggest implied launches</h2>
       <span class="chipline" id="validationchip"></span>
@@ -32,7 +32,7 @@
     <div id="topchart" class="chart"></div>
   </section>
 
-  <section class="panel method" aria-labelledby="methodh">
+  <section class="panel method" id="methodPanel" aria-labelledby="methodh">
     <h2 id="methodh">How the value is derived</h2>
     <div id="method" class="methodbody"></div>
   </section>
@@ -80,6 +80,8 @@
           <option value="growth">7-day growth</option>
           <option value="age">age without a token</option>
           <option value="band">value band width</option>
+          <option value="category">category</option>
+          <option value="odds">token odds</option>
           <option value="name">name</option>
         </select>
       </label>
@@ -95,17 +97,17 @@
     <div class="tablewrap">
       <table id="board" class="board">
         <thead>
-          <tr>
-            <th class="num">#</th>
-            <th>Protocol</th>
-            <th>Category</th>
+          <tr id="headrow">
+            <th class="num sortable" data-sort="rank">#</th>
+            <th class="sortable" data-sort="name">Protocol</th>
+            <th class="sortable" data-sort="category">Category</th>
             <th>Chains</th>
-            <th class="num">TVL</th>
-            <th class="num">7d</th>
-            <th class="num">Age</th>
-            <th class="num">Implied value</th>
-            <th class="num">Band</th>
-            <th class="num">Token odds</th>
+            <th class="num sortable" data-sort="tvl">TVL</th>
+            <th class="num sortable" data-sort="growth">7d</th>
+            <th class="num sortable" data-sort="age">Age</th>
+            <th class="num sortable" data-sort="rank">Implied value</th>
+            <th class="num sortable" data-sort="band">Band width</th>
+            <th class="num sortable" data-sort="odds">Token odds</th>
             <th>Farm</th>
           </tr>
         </thead>

@@ -47,6 +47,15 @@ function usd(value: number): string {
   return `$${Math.round(value).toLocaleString('en-US')}`;
 }
 
+/** A position size the row's own TVL makes defensible: never advice, always a band the reader can drop. */
+function suggestedBudget(row: RadarRow): string {
+  const tvl = row.tvl_usd;
+  if (tvl >= 1e9) return '$500-2,000';
+  if (tvl >= 3e8) return '$300-1,000';
+  if (tvl >= 5e7) return '$200-500';
+  return '$100-300';
+}
+
 /** The cost sheet for that chain. */
 export function chainCost(chain: string): ChainCost {
   return CHAIN_COSTS[chain] ?? DEFAULT_COST;
@@ -185,6 +194,12 @@ export function farmPlan(row: RadarRow, protocol: SnapshotProtocol): FarmStep[] 
     ],
   };
 
+  const cadence: FarmStep = {
+    step: `Set the cadence before the first deposit: ${name} is worth a position of ${suggestedBudget(row)} — enough that a distribution notices it, small enough that a total loss costs nothing you need — touched once a week rather than once, because a launch reads engagement over time and not one transaction.`,
+    cost: 'one budget line you can hold for six months, not a monthly top-up',
+    time: '15 minutes a week on this chain',
+  };
+
   const keep: FarmStep = {
     step: `Write down what you did: the wallet address, the dates, the amounts and the transaction hashes for ${name}. A launch distribution asks for proof of use, and a farm you cannot document is a farm you cannot claim.`,
     cost: 'nothing beyond the notes',
@@ -203,7 +218,7 @@ export function farmPlan(row: RadarRow, protocol: SnapshotProtocol): FarmStep[] 
     time: 'decide before the first deposit, not after',
   };
 
-  const plan = [setup, fund, ...(moves[family] ?? moves.general!), keep, watch, risk];
+  const plan = [setup, fund, ...(moves[family] ?? moves.general!), cadence, keep, watch, risk];
   return plan.slice(0, 8);
 }
 
