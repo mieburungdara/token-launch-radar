@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Launch Radar: pre-token protocols ranked by implied launch value</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="mark" aria-hidden="true">◈</span>
+    <div>
+      <h1>Token Launch Radar</h1>
+      <p class="tagline">Pre-token protocols ranked by what a launch would be worth, and how to farm each one.</p>
+    </div>
+  </div>
+  <div class="topmeta">
+    <span id="asof" class="chip"></span>
+    <span id="sourcechip" class="chip quiet"></span>
+  </div>
+</header>
+
+<main>
+  <section id="kpis" class="kpis" aria-label="Snapshot at a glance"></section>
+
+  <section class="panel method" aria-labelledby="methodh">
+    <h2 id="methodh">How the value is derived</h2>
+    <div id="method" class="methodbody"></div>
+  </section>
+
+  <section class="panel" aria-labelledby="boardh">
+    <div class="panelhead">
+      <h2 id="boardh">The board</h2>
+      <div class="tabs" role="tablist" aria-label="What to rank">
+        <button class="tab is-on" role="tab" aria-selected="true" data-view="pre">Pre-token</button>
+        <button class="tab" role="tab" aria-selected="false" data-view="watch">Watchlist only</button>
+        <button class="tab" role="tab" aria-selected="false" data-view="live">Already trading</button>
+        <button class="tab" role="tab" aria-selected="false" data-view="market">Market multiples</button>
+      </div>
+    </div>
+
+    <form class="controls" id="controls" autocomplete="off">
+      <label class="field search">
+        <span>Search</span>
+        <input type="search" id="q" name="q" placeholder="protocol, ticker, chain, category">
+      </label>
+      <label class="field">
+        <span>Category</span>
+        <select id="category" name="category"></select>
+      </label>
+      <label class="field">
+        <span>Chain</span>
+        <select id="chain" name="chain"></select>
+      </label>
+      <label class="field">
+        <span>Min TVL</span>
+        <select id="minTvl" name="minTvl">
+          <option value="0">any</option>
+          <option value="5000000">$5M+</option>
+          <option value="50000000">$50M+</option>
+          <option value="250000000">$250M+</option>
+          <option value="1000000000">$1B+</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Sort by</span>
+        <select id="sort" name="sort">
+          <option value="rank">implied value</option>
+          <option value="tvl">TVL</option>
+          <option value="growth">7-day growth</option>
+          <option value="age">age without a token</option>
+          <option value="band">value band width</option>
+          <option value="name">name</option>
+        </select>
+      </label>
+      <label class="field check">
+        <input type="checkbox" id="growing" name="growing">
+        <span>Growing TVL only</span>
+      </label>
+      <button type="button" class="reset" id="reset">Reset</button>
+    </form>
+
+    <p class="counts" id="counts" role="status"></p>
+    <div class="tablewrap">
+      <table id="board" class="board">
+        <thead>
+          <tr>
+            <th class="num">#</th>
+            <th>Protocol</th>
+            <th>Category</th>
+            <th>Chains</th>
+            <th class="num">TVL</th>
+            <th class="num">7d</th>
+            <th class="num">Age</th>
+            <th class="num">Implied value</th>
+            <th class="num">Band</th>
+            <th>Farm</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <p class="empty" id="empty" hidden></p>
+    </div>
+  </section>
+
+  <section class="panel" id="livePanel" hidden aria-labelledby="liveh">
+    <h2 id="liveh">Market multiples: what a token already trades at</h2>
+    <p class="note">Every row is a protocol in the same snapshot whose token trades today, with the market-cap-to-TVL multiple the market itself priced it at. These are the comparisons the board's value model leans on.</p>
+    <div class="tablewrap">
+      <table class="board">
+        <thead>
+          <tr><th class="num">#</th><th>Protocol</th><th>Category</th><th class="num">TVL</th><th class="num">Market cap</th><th class="num">MC / TVL</th></tr>
+        </thead>
+        <tbody id="liverows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel" id="marketPanel" hidden aria-labelledby="marketh">
+    <h2 id="marketh">Category comparison sets</h2>
+    <p class="note">Each category's market-cap-to-TVL multiple as the board reads it: its own token-bearing protocols' median, winsorised to the market's 10th-90th percentile and shrunk toward the market by eight pseudo-observations. The last column counts the pre-token rows the board ranks in that category.</p>
+    <div class="tablewrap">
+      <table class="board">
+        <thead>
+          <tr><th>Category</th><th class="num">Peers with a token</th><th class="num">Blended MC / TVL</th><th class="num">25th</th><th class="num">75th</th><th class="num">Pre-token rows</th></tr>
+        </thead>
+        <tbody id="marketrows"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<aside class="drawer" id="drawer" hidden aria-labelledby="detailh">
+  <div class="drawerbar">
+    <h2 id="detailh">Protocol</h2>
+    <button type="button" id="close" class="reset">Close</button>
+  </div>
+  <div id="detail" class="detail"></div>
+</aside>
+
+<footer class="foot">
+  <p>Built from one sealed DefiLlama snapshot; every figure on this page comes from it. A protocol here records no token as of the snapshot date: DefiLlama's record is not proof that no token exists, and an implied value is this radar's own claim, never advice. Farm plans are arithmetic on the snapshot's facts, not endorsements, and no position should be larger than you can lose.</p>
+  <p class="mono" id="footver"></p>
+</footer>
+
+<script src="../data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
