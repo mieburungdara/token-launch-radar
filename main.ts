@@ -70,9 +70,9 @@ try {
   throw error;
 }
 
-// The board's size model is whichever estimator priced the holdout half best; the report says which.
+// The board's value model is whichever variant priced the holdout halves best; the report says which.
 const validation = holdoutReport(snapshot, MODEL);
-const terms = validation.chosen === 'tvl' ? 1 : 3;
+const terms = validation.chosen_terms;
 const fit = fitLogLog(snapshot.protocols, MODEL, snapshot.as_of, terms);
 const board = buildBoard(snapshot, MODEL, fit, { low: validation.band_low, high: validation.band_high });
 const index = new Map(snapshot.protocols.map((p) => [p.slug, p]));
@@ -124,9 +124,7 @@ writeFileSync(
           fitted_offset: row.fitted_offset,
           fitted_offset_sample: row.fitted_offset_sample,
           fitted_sigma: row.fitted_sigma,
-          growth_multiplier: row.growth_multiplier,
-          maturity_multiplier: row.maturity_multiplier,
-          reach_multiplier: row.reach_multiplier,
+          value_terms: row.value_terms,
           implied_value_usd: row.implied_value_usd,
           implied_low_usd: row.implied_low_usd,
           implied_high_usd: row.implied_high_usd,
@@ -160,7 +158,13 @@ const data: RadarData = {
   board_implied_total: withPlans.reduce((sum, row) => sum + row.implied_value_usd, 0),
   uncategorised: uncategorisedCount(snapshot),
   validation,
-  fit: { terms: fit.terms, coefficients: fit.coefficients, sigma: fit.sigma, names: SIZE_TERMS.slice(0, fit.terms) },
+  fit: {
+    terms: fit.terms.length,
+    coefficients: fit.coefficients,
+    sigma: fit.sigma,
+    names: fit.terms.map((term) => String(term)),
+    variant: validation.variants[validation.chosen]!.name,
+  },
   rows: withPlans,
   live,
   categories: categoryMarkets(snapshot, peers, withPlans),
