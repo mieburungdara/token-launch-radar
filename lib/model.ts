@@ -17,9 +17,9 @@
 // The band is the same arithmetic at the 25th and 75th percentile peer multiple, so every row carries the
 // spread its own comparison set shows rather than a single number with no error bar.
 //
-//   odds      = 0.35 x age factor x size factor x category factor, clamped to 0.02..0.95: the model's own
-//               estimate that the protocol issues a token at all, kept apart from the value so a reader can
-//               weigh a certain small protocol against a doubtful large one
+//   odds      = a logistic fit on log TVL, log age, log chains and the category's own token share, on the
+//               snapshot's own records of which protocols carry a token; kept apart from the value so a
+//               reader can weigh a certain small protocol against a doubtful large one
 //
 // The estimator is checked against the snapshot itself: the token-bearing protocols are split by a hash of
 // their slug into a fit half and a holdout half, the multiples are fitted on the fit half, and the market cap
@@ -68,12 +68,10 @@ export interface ModelConstants {
   /** Every peer's multiple is winsorised to these percentiles of the market's before a category reads it. */
   winsor_low_percentile: number;
   winsor_high_percentile: number;
-  /** The odds model: a base rate, how far age and category push it, and the clamp. */
-  odds_base: number;
-  odds_age_weight: number;
-  odds_category_weight: number;
-  odds_floor: number;
-  odds_cap: number;
+  /** The odds fit: how many gradient steps it takes and how hard it regularises. */
+  odds_steps: number;
+  odds_rate: number;
+  odds_decay: number;
   band_low_percentile: number;
   band_high_percentile: number;
   step_cost_note: string;
@@ -94,11 +92,9 @@ export const MODEL: ModelConstants = {
   band_high_percentile: 0.75,
   winsor_low_percentile: 0.1,
   winsor_high_percentile: 0.9,
-  odds_base: 0.35,
-  odds_age_weight: 0.6,
-  odds_category_weight: 0.5,
-  odds_floor: 0.02,
-  odds_cap: 0.95,
+  odds_steps: 600,
+  odds_rate: 1.5,
+  odds_decay: 0.001,
   step_cost_note: 'costs are the ones a first-week farmer pays in gas, bridge and deposit fees only',
 };
 
@@ -129,8 +125,6 @@ export interface RadarRow {
   peer_weight: number;
   peer_low_multiple: number;
   peer_high_multiple: number;
-  fitted_intercept: number | null;
-  fitted_slope: number | null;
   fitted_offset: number;
   fitted_offset_sample: number;
   fitted_sigma: number | null;
@@ -185,7 +179,7 @@ export interface RadarData {
   board_implied_total: number;
   uncategorised: number;
   validation: HoldoutReport;
-  fit: { intercept: number; slope: number; sigma: number };
+  fit: { terms: number; coefficients: number[]; sigma: number; names: readonly string[] };
   rows: RadarRow[];
   live: LiveRow[];
   categories: CategoryMarket[];
@@ -269,13 +263,15 @@ export interface HoldoutReport {
   fit_size: number;
   holdout_size: number;
   constant: EstimatorScore;
+  tvl_only: EstimatorScore;
   fitted: EstimatorScore;
-  chosen: 'constant' | 'fitted';
-  /** The fitted model's residual spread in log10 dollars, kept as the loose reading of the band. */
+  chosen: 'constant' | 'tvl' | 'full';
+  /** The multi-term fit's residual spread in log10 dollars, kept as the loose reading of the band. */
   sigma: number;
   /** The middle half of the holdout half's actual-over-predicted ratios: the band the page shows. */
   band_low: number;
   band_high: number;
+  odds: OddsScore;
 }
 
 /** FNV-1a over a slug: which half a protocol is fitted on, stable for the sealed snapshot. */
@@ -345,10 +341,14 @@ export function multipleFor(protocol: SnapshotProtocol, index: PeerIndex): numbe
   return match === undefined ? index.market.median : match.median;
 }
 
-/** A log-log fit of market cap on TVL, with a shrunk offset per category, and the residual spread. */
+/** What the size model reads: each term in log space, so the fit is a line through them. */
+export const SIZE_TERMS = ['log10 TVL', 'log10 age in days', 'log10 chains'] as const;
+
+/** A fit of log10(market cap) on those terms, plus each category's shrunk median residual. */
 export interface LogFit {
-  intercept: number;
-  slope: number;
+  /** [intercept, ...one per term taken]. */
+  coefficients: number[];
+  terms: number;
   sigma: number;
   offsets: Map<string, number>;
   offset_samples: Map<string, number>;
@@ -356,28 +356,73 @@ export interface LogFit {
 
 const LOG10 = Math.log10;
 
-/** Fit log10(market cap) = intercept + slope x log10(TVL), plus each category's shrunk median residual. */
-export function fitLogLog(protocols: SnapshotProtocol[], model: ModelConstants): LogFit {
-  const points = protocols.filter(hasTradedMultiple).map((p) => ({ p, x: LOG10(p.tvl_usd), y: LOG10(p.mcap_usd!) }));
-  if (points.length < 8) {
-    return { intercept: LOG10(0.2), slope: 1, sigma: 0.6, offsets: new Map(), offset_samples: new Map() };
+/** The terms one protocol contributes, intercept first. */
+function sizeVector(protocol: SnapshotProtocol, asOf: string, terms: number): number[] {
+  const age = ageDays(asOf, protocol.listed_at);
+  const vector = [
+    1,
+    LOG10(Math.max(protocol.tvl_usd, 1)),
+    LOG10((age === null ? model_age_placeholder : age) + 1),
+    LOG10(Math.max(protocol.chains.length, 1)),
+  ];
+  return vector.slice(0, terms + 1);
+}
+
+/** What an unlisted protocol's age term counts as, in days: the same placeholder the maturity term uses. */
+const model_age_placeholder = 365;
+
+/** Solve a small square system by Gaussian elimination with partial pivoting, or null when it is singular. */
+function solveSystem(matrix: number[][], vector: number[]): number[] | null {
+  const n = vector.length;
+  const rows = matrix.map((row, i) => [...row, vector[i]!]);
+  for (let col = 0; col < n; col++) {
+    let pivot = col;
+    for (let row = col + 1; row < n; row++) if (Math.abs(rows[row]![col]!) > Math.abs(rows[pivot]![col]!)) pivot = row;
+    if (Math.abs(rows[pivot]![col]!) < 1e-12) return null;
+    const swap = rows[col]!;
+    rows[col] = rows[pivot]!;
+    rows[pivot] = swap;
+    for (let row = col + 1; row < n; row++) {
+      const factor = rows[row]![col]! / rows[col]![col]!;
+      for (let k = col; k <= n; k++) rows[row]![k] = rows[row]![k]! - factor * rows[col]![k]!;
+    }
   }
-  const meanX = points.reduce((sum, q) => sum + q.x, 0) / points.length;
-  const meanY = points.reduce((sum, q) => sum + q.y, 0) / points.length;
-  let cov = 0;
-  let varX = 0;
-  for (const q of points) {
-    cov += (q.x - meanX) * (q.y - meanY);
-    varX += (q.x - meanX) ** 2;
+  const out = new Array<number>(n).fill(0);
+  for (let row = n - 1; row >= 0; row--) {
+    let sum = rows[row]![n]!;
+    for (let col = row + 1; col < n; col++) sum -= rows[row]![col]! * out[col]!;
+    out[row] = sum / rows[row]![row]!;
   }
-  const slope = varX === 0 ? 1 : cov / varX;
-  const intercept = meanY - slope * meanX;
+  return out;
+}
+
+/** Fit the line by least squares, then read each category's residual median into a shrunk offset. */
+export function fitLogLog(protocols: SnapshotProtocol[], model: ModelConstants, asOf: string, terms = 3): LogFit {
+  const points = protocols.filter(hasTradedMultiple);
+  const width = terms + 1;
+  const empty: LogFit = { coefficients: [LOG10(0.2), 1, 0, 0].slice(0, width), terms, sigma: 0.6, offsets: new Map(), offset_samples: new Map() };
+  if (points.length < width + 4) return empty;
+  const normal: number[][] = Array.from({ length: width }, () => new Array<number>(width).fill(0));
+  const target = new Array<number>(width).fill(0);
+  for (const p of points) {
+    const x = sizeVector(p, asOf, terms);
+    const y = LOG10(p.mcap_usd!);
+    for (let i = 0; i < width; i++) {
+      target[i] += x[i]! * y;
+      for (let j = 0; j < width; j++) normal[i]![j] += x[i]! * x[j]!;
+    }
+  }
+  const coefficients = solveSystem(normal, target);
+  if (coefficients === null) return empty;
   const byCategory = new Map<string, number[]>();
   const residuals: number[] = [];
-  for (const q of points) {
-    const residual = q.y - (intercept + slope * q.x);
+  for (const p of points) {
+    const x = sizeVector(p, asOf, terms);
+    let line = 0;
+    for (let i = 0; i < width; i++) line += coefficients[i]! * x[i]!;
+    const residual = LOG10(p.mcap_usd!) - line;
     residuals.push(residual);
-    const key = q.p.category ?? 'Uncategorised';
+    const key = p.category ?? 'Uncategorised';
     const list = byCategory.get(key);
     if (list === undefined) byCategory.set(key, [residual]);
     else list.push(residual);
@@ -391,13 +436,15 @@ export function fitLogLog(protocols: SnapshotProtocol[], model: ModelConstants):
     offset_samples.set(category, values.length);
   }
   const absolute = residuals.map(Math.abs).sort((a, b) => a - b);
-  return { intercept, slope, sigma: 1.4826 * median(absolute), offsets, offset_samples };
+  return { coefficients, terms, sigma: 1.4826 * median(absolute), offsets, offset_samples };
 }
 
 /** What the fit predicts for a protocol, in dollars, before the growth, maturity and reach terms. */
-export function predictFromFit(protocol: SnapshotProtocol, fit: LogFit): number {
-  const offset = fit.offsets.get(protocol.category ?? 'Uncategorised') ?? 0;
-  return 10 ** (fit.intercept + fit.slope * LOG10(Math.max(protocol.tvl_usd, 1)) + offset);
+export function predictFromFit(protocol: SnapshotProtocol, fit: LogFit, asOf: string): number {
+  const x = sizeVector(protocol, asOf, fit.terms);
+  let line = 0;
+  for (let i = 0; i < x.length; i++) line += fit.coefficients[i]! * x[i]!;
+  return 10 ** (line + (fit.offsets.get(protocol.category ?? 'Uncategorised') ?? 0));
 }
 
 /** One estimator's score: its median absolute error on the half it was fitted on and on the half it was not. */
@@ -429,25 +476,148 @@ function scoreEstimator(
   };
 }
 
-/** Both estimators, fitted on half the token-bearing protocols and judged on the other half. */
+/** How the fitted odds score on the half of the snapshot they were not fitted on. */
+export interface OddsScore {
+  fit_size: number;
+  holdout_size: number;
+  base_rate: number;
+  accuracy: number;
+  fit_accuracy: number;
+  brier: number;
+}
+
+/** Fitted on half the snapshot, judged on the other half: what the two size models and the odds score. */
 export function holdoutReport(snapshot: Snapshot, model: ModelConstants): HoldoutReport {
   const priced = snapshot.protocols.filter(hasTradedMultiple);
   const fit = priced.filter((p) => fnv1a(p.slug) % 2 === 0);
   const holdout = priced.filter((p) => fnv1a(p.slug) % 2 === 1);
   const index = peerIndexOf(fit, model);
-  const logFit = fitLogLog(fit, model);
-  const constant = scoreEstimator('multiple of TVL', fit, holdout, (p) => p.tvl_usd * multipleFor(p, index));
-  const fitted = scoreEstimator('log-log fit', fit, holdout, (p) => predictFromFit(p, logFit));
-  const ratios = holdout.map((p) => p.mcap_usd! / predictFromFit(p, logFit)).sort((a, b) => a - b);
+  const line1 = fitLogLog(fit, model, snapshot.as_of, 1);
+  const line3 = fitLogLog(fit, model, snapshot.as_of, 3);
+  const scores = [
+    scoreEstimator('multiple of TVL', fit, holdout, (p) => p.tvl_usd * multipleFor(p, index)),
+    scoreEstimator('fit on TVL alone', fit, holdout, (p) => predictFromFit(p, line1, snapshot.as_of)),
+    scoreEstimator('fit on TVL, age and chains', fit, holdout, (p) => predictFromFit(p, line3, snapshot.as_of)),
+  ];
+  const best = scores.reduce((top, s) => (s.holdout_mdape < top.holdout_mdape ? s : top), scores[0]!);
+  const chosen = best.name === 'multiple of TVL' ? 'constant' : best.name === 'fit on TVL alone' ? 'tvl' : 'full';
+  const chosenFit = chosen === 'constant' ? line3 : chosen === 'tvl' ? line1 : line3;
+  const price = (p: SnapshotProtocol): number =>
+    chosen === 'constant' ? p.tvl_usd * multipleFor(p, index) : predictFromFit(p, chosenFit, snapshot.as_of);
+  const ratios = holdout.map((p) => p.mcap_usd! / price(p)).sort((a, b) => a - b);
   return {
     fit_size: fit.length,
     holdout_size: holdout.length,
-    constant,
-    fitted,
-    chosen: fitted.holdout_mdape <= constant.holdout_mdape ? 'fitted' : 'constant',
-    sigma: logFit.sigma,
+    constant: scores[0]!,
+    tvl_only: scores[1]!,
+    fitted: scores[2]!,
+    chosen,
+    sigma: line3.sigma,
     band_low: percentile(ratios, model.band_low_percentile),
     band_high: percentile(ratios, model.band_high_percentile),
+    odds: oddsScore(snapshot, model),
+  };
+}
+
+/** The odds model: a logistic line on four terms, fitted on the snapshot's own token records. */
+export interface OddsModel {
+  mean: number[];
+  sd: number[];
+  weights: number[];
+  bias: number;
+}
+
+/** What the odds model reads. */
+export const ODDS_TERMS = ['log10 TVL', 'log10 age in days', 'log10 chains', "the category's token share"] as const;
+
+/** The terms one protocol contributes to the odds. */
+function oddsVector(protocol: SnapshotProtocol, asOf: string, tokenShare: number): number[] {
+  const age = ageDays(asOf, protocol.listed_at);
+  return [
+    LOG10(Math.max(protocol.tvl_usd, 1)),
+    LOG10((age === null ? 365 : age) + 1),
+    LOG10(Math.max(protocol.chains.length, 1)),
+    Math.min(Math.max(tokenShare, 0), 1),
+  ];
+}
+
+/** Fit the odds by gradient descent on a standardised design: no randomness, the same line every run. */
+export function fitOdds(protocols: SnapshotProtocol[], asOf: string, shares: Map<string, number>, model: ModelConstants): OddsModel {
+  const rows = protocols.map((p) => ({
+    x: oddsVector(p, asOf, shares.get(p.category ?? 'Uncategorised') ?? 0),
+    y: recordsNoToken(p) ? 0 : 1,
+  }));
+  const width = 4;
+  const mean = new Array<number>(width).fill(0);
+  const sd = new Array<number>(width).fill(1);
+  if (rows.length === 0) return { mean, sd, weights: new Array<number>(width).fill(0), bias: -1 };
+  for (let i = 0; i < width; i++) mean[i] = rows.reduce((sum, r) => sum + r.x[i]!, 0) / rows.length;
+  for (let i = 0; i < width; i++) {
+    const variance = rows.reduce((sum, r) => sum + (r.x[i]! - mean[i]!) ** 2, 0) / rows.length;
+    sd[i] = Math.sqrt(variance) > 1e-9 ? Math.sqrt(variance) : 1;
+  }
+  const weights = new Array<number>(width).fill(0);
+  let bias = 0;
+  const rate = rows.reduce((sum, r) => sum + r.y, 0) / rows.length;
+  bias = Math.log((rate + 1e-6) / (1 - rate + 1e-6));
+  for (let step = 0; step < model.odds_steps; step++) {
+    const gradW = new Array<number>(width).fill(0);
+    let gradB = 0;
+    for (const r of rows) {
+      let z = bias;
+      for (let i = 0; i < width; i++) z += weights[i]! * ((r.x[i]! - mean[i]!) / sd[i]!);
+      const p = 1 / (1 + Math.exp(-z));
+      const error = p - r.y;
+      gradB += error;
+      for (let i = 0; i < width; i++) gradW[i] += error * ((r.x[i]! - mean[i]!) / sd[i]!);
+    }
+    bias -= (model.odds_rate * gradB) / rows.length;
+    for (let i = 0; i < width; i++) {
+      weights[i] = weights[i]! - model.odds_rate * (gradW[i]! / rows.length + model.odds_decay * weights[i]!);
+    }
+  }
+  return { mean, sd, weights, bias };
+}
+
+/** The fitted probability that a protocol records a token at all, clamped away from 0 and 1. */
+export function predictOdds(protocol: SnapshotProtocol, asOf: string, tokenShare: number, odds: OddsModel): number {
+  if (odds === undefined) return 0.5;
+  let z = odds.bias;
+  const x = oddsVector(protocol, asOf, tokenShare);
+  for (let i = 0; i < x.length; i++) z += odds.weights[i]! * ((x[i]! - odds.mean[i]!) / odds.sd[i]!);
+  const p = 1 / (1 + Math.exp(-z));
+  return Math.min(0.98, Math.max(0.01, Math.round(p * 1000) / 1000));
+}
+
+/** Fit the odds on half the snapshot and read their accuracy and Brier score off the other half. */
+export function oddsScore(snapshot: Snapshot, model: ModelConstants): OddsScore {
+  const shares = categoryTokenShare(snapshot);
+  const all = snapshot.protocols.filter((p) => p.tvl_usd > 0);
+  const fit = all.filter((p) => fnv1a(p.slug) % 2 === 0);
+  const holdout = all.filter((p) => fnv1a(p.slug) % 2 === 1);
+  const odds = fitOdds(fit, snapshot.as_of, shares, model);
+  const judge = (set: SnapshotProtocol[]): { accuracy: number; brier: number } => {
+    if (set.length === 0) return { accuracy: 0, brier: 0 };
+    let hits = 0;
+    let brier = 0;
+    for (const p of set) {
+      const predicted = predictOdds(p, snapshot.as_of, shares.get(p.category ?? 'Uncategorised') ?? 0, odds);
+      const actual = recordsNoToken(p) ? 0 : 1;
+      if ((predicted >= 0.5 ? 1 : 0) === actual) hits++;
+      brier += (predicted - actual) ** 2;
+    }
+    return { accuracy: hits / set.length, brier: brier / set.length };
+  };
+  const onFit = judge(fit);
+  const onHoldout = judge(holdout);
+  const positives = holdout.filter((p) => !recordsNoToken(p)).length;
+  return {
+    fit_size: fit.length,
+    holdout_size: holdout.length,
+    base_rate: holdout.length === 0 ? 0 : positives / holdout.length,
+    accuracy: onHoldout.accuracy,
+    fit_accuracy: onFit.accuracy,
+    brier: onHoldout.brier,
   };
 }
 
@@ -456,8 +626,6 @@ export interface Valuation {
   implied: number;
   low: number;
   high: number;
-  fitted_intercept: number | null;
-  fitted_slope: number | null;
   fitted_offset: number;
   fitted_offset_sample: number;
   fitted_sigma: number | null;
@@ -495,14 +663,12 @@ export function valueProtocol(
   const reachMultiplier = 1 + Math.min(Math.max(p.chains.length, 1), model.chains_cap) * model.chains_step;
   const scale = growthMultiplier * maturityMultiplier * reachMultiplier;
   const round = (value: number): number => Math.max(1, Math.round(value));
-  const base = fit === null ? p.tvl_usd * peer.median : predictFromFit(p, fit);
+  const base = fit === null ? p.tvl_usd * peer.median : predictFromFit(p, fit, asOf);
   const spread = band === null ? (fit === null ? null : 10 ** fit.sigma) : null;
   return {
     implied: round(base * scale),
     low: round((band !== null ? base * band.low : spread === null ? p.tvl_usd * peer.low : base / spread) * scale),
     high: round((band !== null ? base * band.high : spread === null ? p.tvl_usd * peer.high : base * spread) * scale),
-    fitted_intercept: fit === null ? null : fit.intercept,
-    fitted_slope: fit === null ? null : fit.slope,
     fitted_offset: fit === null ? 0 : fit.offsets.get(category) ?? 0,
     fitted_offset_sample: fit === null ? 0 : fit.offset_samples.get(category) ?? 0,
     fitted_sigma: fit === null ? null : fit.sigma,
@@ -533,22 +699,6 @@ export function categoryTokenShare(snapshot: Snapshot): Map<string, number> {
   return share;
 }
 
-/** The model's own estimate that a protocol issues a token at all: 0.02..0.95, and never a fact. */
-export function tokenOdds(
-  p: SnapshotProtocol,
-  asOf: string,
-  sizePercentile: number,
-  tokenShare: number,
-  model: ModelConstants,
-): number {
-  const age = ageDays(asOf, p.listed_at);
-  const ageFactor = age === null ? 1 : 1 + (Math.min(age, model.maturity_days) / model.maturity_days) * model.odds_age_weight;
-  const sizeFactor = 0.7 + Math.min(Math.max(sizePercentile, 0), 1) * 1.3;
-  const categoryFactor = 1 + Math.min(Math.max(tokenShare, 0), 1) * model.odds_category_weight;
-  const odds = model.odds_base * ageFactor * sizeFactor * categoryFactor;
-  return Math.min(model.odds_cap, Math.max(model.odds_floor, Math.round(odds * 1000) / 1000));
-}
-
 /** Every slug that must appear on the board, whatever the model thinks of it. */
 function chosenProtocols(snapshot: Snapshot): Map<string, SnapshotProtocol> {
   const index = new Map(snapshot.protocols.map((p) => [p.slug, p]));
@@ -575,22 +725,12 @@ export function buildBoard(
   const peers = peerIndex(snapshot, model);
   const chosen = chosenProtocols(snapshot);
   const watchlist = new Set(snapshot.watchlist);
-  const tvls = [...chosen.values()].map((p) => p.tvl_usd).sort((a, b) => a - b);
-  const atOrBelow = (value: number): number => {
-    let low = 0;
-    let high = tvls.length;
-    while (low < high) {
-      const mid = (low + high) >> 1;
-      if (tvls[mid]! <= value) low = mid + 1;
-      else high = mid;
-    }
-    return tvls.length === 0 ? 0.5 : low / tvls.length;
-  };
   const shares = categoryTokenShare(snapshot);
+  const odds = fitOdds(snapshot.protocols.filter((p) => p.tvl_usd > 0), snapshot.as_of, shares, model);
   const scored = [...chosen.values()].map((p) => ({
     p,
     v: valueProtocol(p, snapshot.as_of, peers, model, fit, band),
-    odds: tokenOdds(p, snapshot.as_of, atOrBelow(p.tvl_usd), shares.get(p.category ?? 'Uncategorised') ?? 0, model),
+    odds: predictOdds(p, snapshot.as_of, shares.get(p.category ?? 'Uncategorised') ?? 0, odds),
   }));
   scored.sort((a, b) => b.v.implied - a.v.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   const total = scored.reduce((sum, s) => sum + s.v.implied, 0);
@@ -611,8 +751,6 @@ export function buildBoard(
     peer_weight: s.v.peerWeight,
     peer_low_multiple: s.v.peerLow,
     peer_high_multiple: s.v.peerHigh,
-    fitted_intercept: s.v.fitted_intercept,
-    fitted_slope: s.v.fitted_slope,
     fitted_offset: s.v.fitted_offset,
     fitted_offset_sample: s.v.fitted_offset_sample,
     fitted_sigma: s.v.fitted_sigma,

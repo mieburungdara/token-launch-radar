@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import {
   MODEL,
   MODEL_VERSION,
+  SIZE_TERMS,
   SnapshotError,
   fitLogLog,
   boardIssue,
@@ -69,8 +70,10 @@ try {
   throw error;
 }
 
-const fit = fitLogLog(snapshot.protocols, MODEL);
+// The board's size model is whichever estimator priced the holdout half best; the report says which.
 const validation = holdoutReport(snapshot, MODEL);
+const terms = validation.chosen === 'tvl' ? 1 : 3;
+const fit = fitLogLog(snapshot.protocols, MODEL, snapshot.as_of, terms);
 const board = buildBoard(snapshot, MODEL, fit, { low: validation.band_low, high: validation.band_high });
 const index = new Map(snapshot.protocols.map((p) => [p.slug, p]));
 
@@ -95,7 +98,7 @@ writeFileSync(
       source: snapshot.source,
       model_version: MODEL_VERSION,
       model: MODEL,
-      fit: { intercept: fit.intercept, slope: fit.slope, sigma: fit.sigma },
+      fit: { terms: fit.terms, coefficients: fit.coefficients, sigma: fit.sigma },
       watchlist_size: snapshot.watchlist.length,
       validation,
       rows: withPlans.map((row) => {
@@ -118,8 +121,6 @@ writeFileSync(
           peer_weight: row.peer_weight,
           peer_low_multiple: row.peer_low_multiple,
           peer_high_multiple: row.peer_high_multiple,
-          fitted_intercept: row.fitted_intercept,
-          fitted_slope: row.fitted_slope,
           fitted_offset: row.fitted_offset,
           fitted_offset_sample: row.fitted_offset_sample,
           fitted_sigma: row.fitted_sigma,
@@ -159,7 +160,7 @@ const data: RadarData = {
   board_implied_total: withPlans.reduce((sum, row) => sum + row.implied_value_usd, 0),
   uncategorised: uncategorisedCount(snapshot),
   validation,
-  fit: { intercept: fit.intercept, slope: fit.slope, sigma: fit.sigma },
+  fit: { terms: fit.terms, coefficients: fit.coefficients, sigma: fit.sigma, names: SIZE_TERMS.slice(0, fit.terms) },
   rows: withPlans,
   live,
   categories: categoryMarkets(snapshot, peers, withPlans),

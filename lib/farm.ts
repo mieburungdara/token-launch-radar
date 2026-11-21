@@ -220,7 +220,19 @@ export function farmPlan(row: RadarRow, protocol: SnapshotProtocol): FarmStep[] 
     time: 'decide before the first deposit, not after',
   };
 
-  const plan = [setup, fund, ...(moves[family] ?? moves.general!), cadence, keep, watch, risk];
+  const schedule: FarmStep = {
+    step: `Work it in weeks, not one transaction: week 1 opens the position above, week 2 confirms it settled and records the hashes, week 3 repeats the action once for a second data point, week 4 reviews whether ${name} still shows the ${usd(row.tvl_usd)} of TVL it showed when you entered ${row.change_7d === null ? '' : `(${row.change_7d > 0 ? '+' : ''}${row.change_7d.toFixed(1)}% over the last seven days)`}.`,
+    cost: 'four weeks of the gas and fees above, and nothing beyond them',
+    time: 'about 45 minutes across the month',
+  };
+
+  const signal: FarmStep = {
+    step: `Fix the exit test before you need it: add to the position when ${name}'s TVL steps up or the project announces a round, and close it when TVL falls a quarter below ${usd(row.tvl_usd)} with no announcement, because a farm whose protocol is shrinking pays nothing whatever its odds say.`,
+    cost: 'nothing to watch, and the position itself is what you risk',
+    time: '5 minutes a month',
+  };
+
+  const plan = [setup, fund, ...(moves[family] ?? moves.general!), cadence, schedule, signal, keep, watch, risk];
   return plan.slice(0, 8);
 }
 

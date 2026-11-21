@@ -114,6 +114,11 @@
   el('sourcechip').textContent = R.source;
   el('footver').textContent = 'model ' + R.model_version + ' · ' + R.board_size + ' ranked rows · snapshot ' + R.as_of;
 
+  function bestScore() {
+    var v = R.validation;
+    return v.chosen === 'constant' ? v.constant : v.chosen === 'tvl' ? v.tvl_only : v.fitted;
+  }
+
   var kpis = [
     { k: 'Protocols read', v: String(R.board_size + R.set_aside_size + R.live_size), s: 'pre-token candidates, set-aside products and live tokens' },
     { k: 'Ranked pre-token', v: String(R.board_size), s: R.candidate_size + ' records no token; ' + R.set_aside_size + ' set aside as somebody else\'s' },
@@ -121,7 +126,7 @@
     { k: 'Rank 1 implied value', v: usd(rows[0] ? rows[0].implied_value_usd : 0), s: rows[0] ? rows[0].name : '' },
     { k: 'Board implied total', v: usd(R.board_implied_total), s: 'the model\'s own claim, not a forecast' },
     { k: 'Market median MC / TVL', v: times(R.market_median_multiple), s: 'from ' + (R.live_size) + ' protocols whose token trades' },
-    { k: 'Holdout error', v: (R.validation.fitted.holdout_mdape * 100).toFixed(0) + '%', s: 'median error pricing ' + R.validation.holdout_size + ' protocols the model was not fitted on' }
+    { k: 'Holdout error', v: (bestScore().holdout_mdape * 100).toFixed(0) + '%', s: 'median error pricing ' + R.validation.holdout_size + ' protocols the model was not fitted on' }
   ];
   el('kpis').innerHTML = kpis.map(function (k) {
     return '<div class="kpi"><span class="k">' + esc(k.k) + '</span><span class="v' + (k.k.indexOf('implied') >= 0 ? ' amber' : '') + '">' + esc(k.v) + '</span><span class="s">' + esc(k.s) + '</span></div>';
@@ -129,16 +134,17 @@
 
   var m = R.model;
   el('method').innerHTML =
-    '<div class="formula">size      = log10(market cap) = ' + R.fit.intercept.toFixed(3) + ' + ' + R.fit.slope.toFixed(3) + ' × log10(TVL) + category offset\n' +
-    '            fitted on the snapshot\'s token-bearing protocols; each category\'s median residual is added,\n' +
-    '            shrunk toward zero by ' + m.min_peers + ' pseudo-observations, so a category with two peers\n' +
-    '            moves the estimate a fifth as far as a category with a hundred\n' +
+    '<div class="formula">size      = log10(market cap) = ' + R.fit.coefficients.map(function (c, i) { return (i ? ' + ' + c.toFixed(3) + ' × ' : '') + (i ? R.fit.names[i - 1] : c.toFixed(3)); }).join('') + ' + category offset\n' +
+    '            the best of three estimators on the holdout half; each category\'s median residual is added after\n' +
+    '            the line, shrunk toward zero by ' + m.min_peers + ' pseudo-observations\n' +
     'growth    = 1 + clamp(change_7d, ' + m.growth_floor + '%, ' + m.growth_cap + '%) × ' + m.growth_weight + '   (unreported growth: 1.00)\n' +
     'maturity  = 0.75 + min(age without a token, ' + m.maturity_days + 'd) / ' + m.maturity_days + ' × 0.45   (age unknown: ' + m.unknown_age_multiplier.toFixed(2) + ')\n' +
     'reach     = 1 + min(chains, ' + m.chains_cap + ') × ' + m.chains_step + '\n' +
     'implied   = max(1, round(size × growth × maturity × reach))\n' +
     'band      = the middle half of the holdout half\'s actual-over-predicted ratios: ×' + R.validation.band_low.toFixed(2) + ' to ×' + R.validation.band_high.toFixed(2) + '\n' +
-    'odds      = ' + m.odds_base + ' × age factor × size factor × category factor, clamped to ' + m.odds_floor + '..' + m.odds_cap + '</div>' +
+    'odds      = a logistic fit on TVL, age, chains and the category\'s token share, on the snapshot\'s own\n' +
+    '            records of which protocols carry a token: it calls ' + (R.validation.odds.accuracy * 100).toFixed(0) + '% of the holdout half right,\n' +
+    '            against a ' + (R.validation.odds.base_rate * 100).toFixed(0) + '% base rate, so treat the odds as a weak prior and not a forecast</div>' +
     '<p><b>Every input is in the snapshot.</b> Nothing here is a fixed multiple: the size term is a line fitted through the protocols this same file records a market cap for, so the model moves with the market it was sealed against, and the band under every row is the error that fit actually made on protocols it had never seen. TVL, its seven-day change and the age a protocol has run without a token are the three facts the board is asked to weigh; chain reach is the fourth, and it is the only one that is not a market figure.</p>' +
     '<p><b>What is set aside.</b> ' + R.set_aside_size + ' records-no-token protocols are not launch candidates: wrapped, staked and bridged products of a token that already trades, exchange-run products, and versioned pools. They are counted here and ranked nowhere, because their launch is somebody else\'s token under another name.</p>' +
     '<p><b>What this is not.</b> DefiLlama\'s record is not proof: a row says a protocol <b>records no token</b> as of ' + R.as_of + ', never that it has none. An implied value is this radar\'s claim about a launch that has not happened. ' + m.step_cost_note + '.</p>';
@@ -197,7 +203,7 @@
   function drawChart() {
     var head = rows.slice(0, 12);
     var top = head.length ? head[0].implied_value_usd : 1;
-    el('validationchip').textContent = 'holdout median error ' + (R.validation.fitted.holdout_mdape * 100).toFixed(0) + '% over ' + R.validation.holdout_size + ' priced protocols (' + R.validation.fit_size + ' fitted)';
+    el('validationchip').textContent = 'holdout median error ' + (bestScore().holdout_mdape * 100).toFixed(0) + '% over ' + R.validation.holdout_size + ' priced protocols (' + R.validation.fit_size + ' fitted)';
     el('topchart').innerHTML = head.map(function (r) {
       var width = Math.max(2, Math.round((r.implied_value_usd / top) * 100));
       return '<button type="button" class="barrow" data-slug="' + esc(r.slug) + '">' +
@@ -257,15 +263,22 @@
       '<td class="num ' + (r.multiple >= R.market_median_multiple ? 'up' : 'down') + '">' + times(r.multiple) + '</td></tr>';
   }).join('');
   var v = R.validation;
+  var chosenScore = bestScore();
   var line = function (score) {
-    return '<div class="card"><h4>' + esc(score.name) + (score.name === (v.chosen === 'fitted' ? 'log-log fit' : 'multiple of TVL') ? ' &middot; the board uses this one' : '') + '</h4><dl class="kv">' +
+    return '<div class="card"><h4>' + esc(score.name) + (score === chosenScore ? ' &middot; the board uses this one' : '') + '</h4><dl class="kv">' +
       '<dt>Median error, holdout half</dt><dd class="val">' + (score.holdout_mdape * 100).toFixed(1) + '%</dd>' +
       '<dt>Median error, fit half</dt><dd>' + (score.fit_mdape * 100).toFixed(1) + '%</dd>' +
       '<dt>Within half the truth</dt><dd>' + score.holdout_within_half + ' of ' + v.holdout_size + '</dd>' +
       '<dt>Within twice the truth</dt><dd>' + score.holdout_within_2x + ' of ' + v.holdout_size + '</dd></dl></div>';
   };
   el('validation').innerHTML =
-    line(v.fitted) + line(v.constant) +
+    line(v.constant) + line(v.tvl_only) + line(v.fitted) +
+    '<div class="card"><h4>The odds, fitted the same way</h4><dl class="kv">' +
+      '<dt>Protocols fitted on</dt><dd>' + v.odds.fit_size + '</dd>' +
+      '<dt>Called right, holdout half</dt><dd class="val">' + (v.odds.accuracy * 100).toFixed(1) + '%</dd>' +
+      '<dt>Base rate to beat</dt><dd>' + (v.odds.base_rate * 100).toFixed(1) + '%</dd>' +
+      '<dt>Brier score</dt><dd>' + v.odds.brier.toFixed(3) + '</dd></dl>' +
+      '<p class="note">The odds are a logistic fit on the same snapshot, not a guess: TVL, age, chain count and the category\'s own token share, judged on the half it was not fitted on. ' + (v.odds.accuracy > v.odds.base_rate ? 'It beats the base rate, and not by much.' : 'It does not beat the base rate.') + '</p></div>' +
     '<div class="card"><h4>The split</h4><dl class="kv">' +
       '<dt>Token-bearing protocols</dt><dd>' + (v.fit_size + v.holdout_size) + '</dd>' +
       '<dt>Fit half</dt><dd>' + v.fit_size + '</dd>' +
@@ -273,7 +286,7 @@
       '<dt>Split by</dt><dd>hash of slug, even/odd</dd>' +
       '<dt>Band in force</dt><dd>×' + v.band_low.toFixed(2) + ' – ×' + v.band_high.toFixed(2) + '</dd>' +
       '<dt>Residual spread</dt><dd>' + v.sigma.toFixed(2) + ' log10</dd></dl>' +
-      '<p class="note">Both estimators are fitted on the fit half only and judged on the holdout half. The board uses whichever prices the holdout half better; today that is the ' + (v.chosen === 'fitted' ? 'log-log fit' : 'flat multiple of TVL') + '. The gap between each one\'s two errors is how much of it is memorised rather than learned.</p></div>' +
+      '<p class="note">All three estimators are fitted on the fit half only and judged on the holdout half. The board uses whichever priced the holdout half best: today the ' + esc(chosenScore.name) + '. The gap between each one\'s two errors is how much of it is memorised rather than learned.</p></div>' +
     '<div class="card"><h4>What this does not mean</h4><p class="note">A pre-token protocol has no market cap to be wrong about, so the only checkable part of this radar is how it prices the protocols whose token already trades. A holdout error of ' + (v.fitted.holdout_mdape * 100).toFixed(0) + '% is the size of the claim under every row, and the band on each row is that error made honest rather than a forecast.</p></div>';
 
   el('marketrows').innerHTML = categories.map(function (c) {
@@ -316,7 +329,7 @@
           '<dt>Chains</dt><dd>' + (r.chains || []).length + '</dd>' +
           '<dt>Token record</dt><dd>none as of ' + esc(R.as_of) + '</dd></dl></div>' +
         '<div class="card"><h4>Value model, this row</h4><dl class="kv">' +
-          '<dt>Fit intercept / slope</dt><dd>' + (r.fitted_intercept === null ? '—' : r.fitted_intercept.toFixed(3) + ' / ' + r.fitted_slope.toFixed(3)) + '</dd>' +
+          '<dt>Fit line</dt><dd>' + R.fit.terms + ' term' + (R.fit.terms === 1 ? '' : 's') + '</dd>' +
           '<dt>Category offset (' + r.peer_basis + ', n=' + r.fitted_offset_sample + ')</dt><dd class="val">' + (r.fitted_offset >= 0 ? '+' : '') + r.fitted_offset.toFixed(3) + ' log10</dd>' +
           '<dt>Comparison: multiple of TVL</dt><dd>' + times(r.peer_multiple) + '</dd>' +
           '<dt>Growth multiplier</dt><dd>' + r.growth_multiplier.toFixed(3) + '</dd>' +
