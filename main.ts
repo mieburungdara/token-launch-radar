@@ -7,7 +7,7 @@
 // The program is one pass, with no network call and no clock: the same snapshot always writes the same
 // bytes, which is what the grader's two runs compare.
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -166,7 +166,7 @@ const data: RadarData = {
 };
 writeFileSync(join(out, 'data.js'), dataScript(data));
 
-/** Copy one directory's regular files into `to`, skipping names that start with a dot. */
+/** Copy one directory's regular files into `to`, skipping names that start with a dot and any stale file. */
 function copyFiles(from: string, to: string): string[] {
   if (!existsSync(from)) return [];
   mkdirSync(to, { recursive: true });
@@ -177,6 +177,13 @@ function copyFiles(from: string, to: string): string[] {
     if (!statSync(path).isFile()) continue;
     copyFileSync(path, join(to, name));
     copied.push(name);
+  }
+  // `to` mirrors `from`: a file the last run left there and this one does not carry is no longer part of the entry.
+  const kept = new Set(copied);
+  for (const name of readdirSync(to)) {
+    if (kept.has(name) || name.startsWith('.')) continue;
+    const path = join(to, name);
+    if (statSync(path).isFile()) unlinkSync(path);
   }
   return copied;
 }

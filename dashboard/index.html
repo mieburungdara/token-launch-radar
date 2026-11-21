@@ -24,6 +24,24 @@
 <main>
   <section id="kpis" class="kpis" aria-label="Snapshot at a glance"></section>
 
+  <section class="panel" id="pinnedPanel" hidden aria-labelledby="pinnedh">
+    <div class="panelhead">
+      <h2 id="pinnedh">Your shortlist</h2>
+      <div class="pinacts">
+        <button type="button" class="reset" id="compare">Compare the first two</button>
+        <button type="button" class="reset" id="clearPins">Unpin all</button>
+      </div>
+    </div>
+    <p class="note">Pinned protocols are kept in this browser and in the page's own address, so a shortlist survives a reload and can be shared. Pin two or more and compare them side by side.</p>
+    <div id="pinnedList" class="pinned"></div>
+  </section>
+
+  <section class="panel" id="comparePanel" hidden aria-labelledby="compareh">
+    <h2 id="compareh">Side by side</h2>
+    <p class="note" id="compareNote"></p>
+    <div id="compareGrid" class="compare"></div>
+  </section>
+
   <section class="panel chartpanel" id="chartPanel" aria-labelledby="charth">
     <div class="panelhead">
       <h2 id="charth">The radar's head: the twelve biggest implied launches</h2>
@@ -46,6 +64,7 @@
         <button class="tab" role="tab" aria-selected="false" data-view="live">Already trading</button>
         <button class="tab" role="tab" aria-selected="false" data-view="market">Market multiples</button>
         <button class="tab" role="tab" aria-selected="false" data-view="validation">Model check</button>
+        <button class="tab" role="tab" aria-selected="false" data-view="compare">Side by side</button>
       </div>
     </div>
 
@@ -109,6 +128,7 @@
             <th class="num sortable" data-sort="band">Band width</th>
             <th class="num sortable" data-sort="odds">Token odds</th>
             <th>Farm</th>
+            <th title="Pin to your shortlist">Pin</th>
           </tr>
         </thead>
         <tbody id="rows"></tbody>

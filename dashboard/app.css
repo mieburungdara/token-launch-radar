@@ -119,6 +119,24 @@ input[type="search"]:focus, select:focus { outline: 2px solid var(--amber-dim); 
 .bartrack > i { display: block; height: 100%; background: linear-gradient(90deg, #4a3418, var(--amber)); }
 .barvalue { font-family: var(--mono); font-size: 12.5px; color: var(--amber); text-align: right; }
 @media (max-width: 720px) { .barrow { grid-template-columns: 1fr 70px; } .bartrack { display: none; } }
+.pinacts { display: flex; gap: 8px; }
+.pinned { display: grid; gap: 6px; }
+.pinrow { display: grid; grid-template-columns: 34px minmax(140px, 1fr) 92px 92px 92px auto; gap: 10px; align-items: center; font-size: 12.5px; }
+.pinrow .rank { font-family: var(--mono); color: var(--faint); }
+.pinrow .val { font-family: var(--mono); color: var(--amber); }
+.pinrow .meta { color: var(--muted); font-family: var(--mono); }
+.pin {
+  background: none; border: 1px solid var(--line-2); color: var(--muted); border-radius: 6px;
+  width: 24px; height: 22px; line-height: 1; cursor: pointer; font: inherit; font-size: 12px;
+}
+.pin:hover { color: var(--text); border-color: var(--amber-dim); }
+.pin.is-on { color: var(--amber); border-color: var(--amber); background: rgba(255, 180, 84, 0.08); }
+.compare { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+.compare .side { display: grid; gap: 10px; }
+.compare h3 { font-size: 16px; }
+.compare .badge { margin-left: 6px; }
+.compare .steps { gap: 6px; }
+.compare table.mini td.num { font-family: var(--mono); }
 .tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
 table.board { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.board th.sortable { cursor: pointer; user-select: none; }

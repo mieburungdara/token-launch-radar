@@ -63,8 +63,24 @@
     minTvl: 0,
     sort: 'rank',
     growing: false,
-    slug: null
+    slug: null,
+    pins: [],
+    compare: []
   };
+  var STORE = 'token-radar-shortlist-v1';
+  function readStoredPins() {
+    try {
+      var saved = window.localStorage.getItem(STORE);
+      if (!saved) return [];
+      var list = JSON.parse(saved);
+      return Array.isArray(list) ? list.filter(function (s) { return bySlug[s]; }) : [];
+    } catch (e) {
+      return [];
+    }
+  }
+  function storePins() {
+    try { window.localStorage.setItem(STORE, JSON.stringify(state.pins)); } catch (e) { /* a file:// page may refuse; the address still carries them */ }
+  }
   var params = new URLSearchParams(window.location.search);
   ['view', 'q', 'category', 'chain', 'sort', 'slug'].forEach(function (key) {
     var value = params.get(key);
@@ -72,6 +88,10 @@
   });
   if (params.get('minTvl')) state.minTvl = Number(params.get('minTvl')) || 0;
   if (params.get('growing') === '1') state.growing = true;
+  var urlPins = (params.get('pins') || '').split(',').filter(function (s) { return bySlug[s]; });
+  state.pins = urlPins.length ? urlPins : readStoredPins();
+  state.compare = (params.get('compare') || '').split(',').filter(function (s) { return bySlug[s]; }).slice(0, 2);
+  if (state.compare.length === 2 && !params.get('view')) state.view = 'compare';
 
   function push() {
     var q = new URLSearchParams();
@@ -83,6 +103,8 @@
     if (state.sort !== 'rank') q.set('sort', state.sort);
     if (state.growing) q.set('growing', '1');
     if (state.slug) q.set('slug', state.slug);
+    if (state.pins.length) q.set('pins', state.pins.join(','));
+    if (state.compare.length) q.set('compare', state.compare.join(','));
     var url = window.location.pathname + (q.toString() ? '?' + q.toString() : '');
     try { window.history.replaceState(null, '', url); } catch (e) { /* a file:// page may refuse; the view still works */ }
   }
@@ -201,6 +223,7 @@
         '<td class="num bandcell">' + usd(r.implied_low_usd) + ' – ' + usd(r.implied_high_usd) + '</td>' +
         '<td class="num">' + Math.round(r.token_odds * 100) + '%</td>' +
         '<td class="plan">' + r.farm_plan.length + ' steps · ' + esc(String(r.farm_plan[0].step).slice(0, 62)) + '…</td>' +
+        '<td><button type="button" class="pin' + (state.pins.indexOf(r.slug) >= 0 ? ' is-on' : '') + '" data-pin="' + esc(r.slug) + '" title="' + (state.pins.indexOf(r.slug) >= 0 ? 'Unpin' : 'Pin to the shortlist') + '">' + (state.pins.indexOf(r.slug) >= 0 ? '★' : '＋') + '</button></td>' +
         '</tr>';
     }).join('');
     var what = state.view === 'watch' ? 'watchlist rows' : 'ranked pre-token rows';
@@ -215,7 +238,7 @@
     livePanel.hidden = state.view !== 'live';
     marketPanel.hidden = state.view !== 'market';
     validationPanel.hidden = state.view !== 'validation';
-    var boardHidden = state.view === 'live' || state.view === 'market' || state.view === 'validation';
+    var boardHidden = state.view === 'live' || state.view === 'market' || state.view === 'validation' || state.view === 'compare';
     document.querySelector('.panel[aria-labelledby="boardh"]').hidden = boardHidden;
     el('kpis').hidden = state.view === 'validation';
     el('chartPanel').hidden = boardHidden;
@@ -279,8 +302,9 @@
       '<div class="dhead">' +
         '<div><h3>#' + r.rank + ' ' + esc(r.name) + '</h3>' +
         '<div class="dsub">' + esc(r.slug) + ' · ' + esc(r.category || 'uncategorised') + ' · ' + esc((r.chains || []).join(', ') || 'no chain recorded') +
-        (r.on_watchlist ? ' · <span class="badge">watchlist</span>' : ' · below the watchlist floor') + '</div></div>' +
-        '<div class="dvalue"><div class="v">' + usdExact(r.implied_value_usd) + '</div>' +
+        (r.on_watchlist ? ' · <span class="badge">watchlist</span>' : ' · off the watchlist, ranked by the model all the same') + '</div></div>' +
+        '<div class="dvalue"><button type="button" class="reset" data-pin="' + esc(r.slug) + '">' + (state.pins.indexOf(r.slug) >= 0 ? '★ Pinned' : '＋ Pin to the shortlist') + '</button>' +
+        '<div class="v">' + usdExact(r.implied_value_usd) + '</div>' +
         '<div class="s">band ' + usd(r.implied_low_usd) + ' – ' + usd(r.implied_high_usd) + ' (' + usd(band) + ' wide)</div></div>' +
       '</div>' +
       '<div class="dgrid">' +
@@ -349,6 +373,12 @@
   }
 
   el('rows').addEventListener('click', function (event) {
+    var pin = event.target.closest('[data-pin]');
+    if (pin) {
+      event.stopPropagation();
+      togglePin(pin.getAttribute('data-pin'));
+      return;
+    }
     var tr = event.target.closest('tr[data-slug]');
     if (tr) openDetail(tr.getAttribute('data-slug'));
   });
@@ -376,6 +406,10 @@
     document.body.removeChild(link);
   });
   el('close').addEventListener('click', closeDetail);
+  el('detail').addEventListener('click', function (event) {
+    var pin = event.target.closest('[data-pin]');
+    if (pin) togglePin(pin.getAttribute('data-pin'));
+  });
   document.addEventListener('keydown', function (event) {
     if (event.key === 'Escape' && state.slug) closeDetail();
   });
@@ -410,18 +444,107 @@
     });
   });
   Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (tab) {
-    tab.addEventListener('click', function () {
-      state.view = tab.getAttribute('data-view');
-      Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (other) {
-        var on = other === tab;
-        other.classList.toggle('is-on', on);
-        other.setAttribute('aria-selected', on ? 'true' : 'false');
-      });
-      closeDetailIfOpen();
-      render(); push();
-    });
+    tab.addEventListener('click', function () { setView(tab.getAttribute('data-view')); });
   });
   function closeDetailIfOpen() { if (state.slug) closeDetail(); }
+
+  // ---------------------------------------------------------------- shortlist and side by side
+  function togglePin(slug) {
+    var at = state.pins.indexOf(slug);
+    if (at >= 0) state.pins.splice(at, 1);
+    else state.pins.push(slug);
+    storePins();
+    renderPins();
+    render();
+    push();
+  }
+
+  function renderPins() {
+    var pinned = state.pins.map(function (slug) { return bySlug[slug]; }).filter(Boolean);
+    el('pinnedPanel').hidden = pinned.length === 0;
+    el('pinnedList').innerHTML = pinned.map(function (r) {
+      return '<div class="pinrow">' +
+        '<span class="rank">#' + r.rank + '</span>' +
+        '<span>' + esc(r.name) + ' <span class="slug">' + esc(r.category || '—') + '</span></span>' +
+        '<span class="val">' + usd(r.implied_value_usd) + '</span>' +
+        '<span class="meta">odds ' + Math.round(r.token_odds * 100) + '%</span>' +
+        '<span class="meta">' + (r.on_watchlist ? 'watchlist' : 'off the watchlist') + '</span>' +
+        '<span><button type="button" class="pin is-on" data-unpin="' + esc(r.slug) + '" title="Unpin">×</button>' +
+        ' <button type="button" class="reset" data-solo="' + esc(r.slug) + '">Open</button></span>' +
+      '</div>';
+    }).join('');
+    el('compare').hidden = pinned.length < 2;
+    el('clearPins').hidden = pinned.length === 0;
+  }
+
+  el('pinnedList').addEventListener('click', function (event) {
+    var unpin = event.target.closest('[data-unpin]');
+    if (unpin) { togglePin(unpin.getAttribute('data-unpin')); return; }
+    var solo = event.target.closest('[data-solo]');
+    if (solo) { state.compare = []; openDetail(solo.getAttribute('data-solo')); }
+  });
+  el('clearPins').addEventListener('click', function () {
+    state.pins = [];
+    state.compare = [];
+    storePins();
+    setView(state.view === 'compare' ? 'pre' : state.view);
+  });
+  el('compare').addEventListener('click', function () {
+    state.compare = state.pins.slice(0, 2);
+    setView('compare');
+  });
+  function setView(view) {
+    state.view = view;
+    Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (tab) {
+      var on = tab.getAttribute('data-view') === view;
+      tab.classList.toggle('is-on', on);
+      tab.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    closeDetailIfOpen();
+    render();
+    push();
+  }
+
+  function compareSide(r) {
+    var peers = (peersByCategory[r.category || 'Uncategorised'] || []).slice(0, 5);
+    var steps = r.farm_plan.slice(0, 4).map(function (s) {
+      return '<li><div><div class="what">' + esc(s.step) + '</div><div class="when"><span>Cost:</span> ' + esc(s.cost) + ' · <span>Time:</span> ' + esc(s.time) + '</div></div></li>';
+    }).join('');
+    return '<div class="side">' +
+      '<h3>#' + r.rank + ' ' + esc(r.name) + (r.on_watchlist ? '<span class="badge">watchlist</span>' : '') + '</h3>' +
+      '<div class="dsub">' + esc(r.category || 'uncategorised') + ' · ' + esc((r.chains || []).join(', ') || 'no chain recorded') + '</div>' +
+      '<div class="card"><h4>Value</h4><dl class="kv">' +
+        '<dt>Implied value</dt><dd class="val">' + usdExact(r.implied_value_usd) + '</dd>' +
+        '<dt>Band</dt><dd>' + usd(r.implied_low_usd) + ' – ' + usd(r.implied_high_usd) + '</dd>' +
+        '<dt>TVL</dt><dd>' + usdExact(r.tvl_usd) + '</dd>' +
+        '<dt>7-day change</dt><dd class="' + pctClass(r.change_7d) + '">' + pct(r.change_7d) + '</dd>' +
+        '<dt>Age without a token</dt><dd>' + (r.age_days === null ? 'unknown' : r.age_days + ' days') + '</dd>' +
+        '<dt>Token odds</dt><dd>' + Math.round(r.token_odds * 100) + '%</dd>' +
+        '<dt>Category offset</dt><dd>' + (r.fitted_offset >= 0 ? '+' : '') + r.fitted_offset.toFixed(3) + ' log10 (n=' + r.fitted_offset_sample + ')</dd>' +
+        '<dt>Growth / maturity / reach</dt><dd>' + r.growth_multiplier.toFixed(2) + ' / ' + r.maturity_multiplier.toFixed(2) + ' / ' + r.reach_multiplier.toFixed(2) + '</dd></dl>' +
+        '<div class="formula">' + usd(r.tvl_usd) + ' → size ' + usdExact(r.implied_value_usd / (r.growth_multiplier * r.maturity_multiplier * r.reach_multiplier)) + ' × ' + r.growth_multiplier.toFixed(3) + ' × ' + r.maturity_multiplier.toFixed(3) + ' × ' + r.reach_multiplier.toFixed(3) + ' = ' + usdExact(r.implied_value_usd) + '</div></div>' +
+      '<div class="card"><h4>First steps</h4><ol class="steps">' + steps + '</ol></div>' +
+      '<div class="card"><h4>Comparison set</h4>' + (peers.length ? '<table class="mini"><tbody>' + peers.map(function (p) { return '<tr><td>' + esc(p.name) + '</td><td class="num">' + times(p.multiple) + '</td></tr>'; }).join('') + '</tbody></table>' : '<p class="note">No token-bearing peer in this category.</p>') + '</div>' +
+      '<button type="button" class="reset" data-solo="' + esc(r.slug) + '">Open the full detail view</button>' +
+    '</div>';
+  }
+
+  function renderCompare() {
+    var sides = state.compare.map(function (slug) { return bySlug[slug]; }).filter(Boolean);
+    var ok = sides.length === 2;
+    el('comparePanel').hidden = state.view !== 'compare';
+    if (!ok) {
+      el('compareGrid').innerHTML = '<p class="empty">Pin two protocols and press Compare, or open this view with ?compare=&lt;slug&gt;,&lt;slug&gt;. ' + state.pins.length + ' pinned so far.</p>';
+      el('compareNote').textContent = '';
+      return;
+    }
+    el('compareNote').textContent = 'The same arithmetic, side by side: what each protocol is worth under the fitted model, what it would take to farm, and which peers its multiple comes from.';
+    el('compareGrid').innerHTML = compareSide(sides[0]) + compareSide(sides[1]);
+  }
+  el('compareGrid').addEventListener('click', function (event) {
+    var solo = event.target.closest('[data-solo]');
+    if (solo) openDetail(solo.getAttribute('data-solo'));
+  });
 
   // ---------------------------------------------------------------- first paint
   Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (tab) {
@@ -430,7 +553,9 @@
     tab.setAttribute('aria-selected', on ? 'true' : 'false');
   });
   drawChart();
+  renderPins();
   render();
+  renderCompare();
   if (state.slug && bySlug[state.slug]) openDetail(state.slug);
   document.getElementById('board').setAttribute('aria-busy', 'false');
 })();

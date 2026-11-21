@@ -82,10 +82,12 @@ export function farmPlan(row: RadarRow, protocol: SnapshotProtocol): FarmStep[] 
   const cost = chainCost(chain);
   const name = row.name;
   const family = familyOf(row.category);
-  const tenure = row.age_days === null ? 'however long it has run' : `${Math.round(row.age_days / 30)} months`;
+  const months = row.age_days === null ? null : Math.round(row.age_days / 30);
+  const tenure = months === null ? 'however long it has run' : `${months} months`;
 
+  const spread = (protocol.chains ?? []).filter((c) => c !== chain).slice(0, 2);
   const setup: FarmStep = {
-    step: `Open a wallet on ${chain} and keep it for this protocol alone: a fresh address per farm keeps one bad contract away from your main holdings, and ${name} is a ${chain} deployment you should try with a small first deposit.`,
+    step: `Open a wallet on ${chain} and keep it for this protocol alone: a fresh address per farm keeps one bad contract away from your main holdings, and ${name} is a ${chain} deployment you should try with a small first deposit${spread.length ? `, then repeat on ${spread.join(' and ')} if the position holds up` : ''}.`,
     cost: cost.bridge,
     time: '10-20 minutes including the on-ramp',
   };
@@ -195,7 +197,7 @@ export function farmPlan(row: RadarRow, protocol: SnapshotProtocol): FarmStep[] 
   };
 
   const cadence: FarmStep = {
-    step: `Set the cadence before the first deposit: ${name} is worth a position of ${suggestedBudget(row)} — enough that a distribution notices it, small enough that a total loss costs nothing you need — touched once a week rather than once, because a launch reads engagement over time and not one transaction.`,
+    step: `Set the cadence before the first deposit: ${name} is worth a position of ${suggestedBudget(row)}${months === null ? '' : `, weighed against the ${tenure} it has already run with no token`} — enough that a distribution notices it, small enough that a total loss costs nothing you need — touched once a week rather than once, because a launch reads engagement over time and not one transaction.`,
     cost: 'one budget line you can hold for six months, not a monthly top-up',
     time: '15 minutes a week on this chain',
   };
